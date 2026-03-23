@@ -226,6 +226,32 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(harness.model.banner)
     }
 
+    func testBannerAutoDismissesAfterDelay() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let cliLauncher = RecordingCodexCLILauncher()
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            cliLauncher: cliLauncher,
+            bannerAutoDismissDuration: .milliseconds(50)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: makeWorkingDirectoryURL("auto-dismiss-cli"))
+        XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 打开 Codex CLI。")
+
+        try? await Task.sleep(for: .milliseconds(120))
+
+        XCTAssertNil(harness.model.banner)
+    }
+
     func testRestartPromptMessageSurvivesUnrelatedBannerUpdates() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
@@ -535,14 +561,17 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.prepare()
         let account = try XCTUnwrap(harness.model.accounts.first)
+        let workingDirectoryURL = makeWorkingDirectoryURL("global-cli")
 
         XCTAssertTrue(account.isActive)
 
-        await harness.model.openCodexCLI(for: account)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: workingDirectoryURL)
 
         XCTAssertEqual(oauthClient.refreshCallCount, 0)
         XCTAssertEqual(cliLauncher.launchCallCount, 1)
         XCTAssertEqual(cliLauncher.lastMode, .globalCurrentAuth)
+        XCTAssertEqual(cliLauncher.lastWorkingDirectoryURL, workingDirectoryURL)
+        XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [workingDirectoryURL.path])
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 打开 Codex CLI。")
         XCTAssertFalse(harness.model.isLaunchingCLI(for: account.id))
     }
@@ -577,15 +606,18 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.prepare()
         let account = try XCTUnwrap(harness.model.accounts.first)
+        let workingDirectoryURL = makeWorkingDirectoryURL("refreshed-cli")
 
         XCTAssertFalse(account.isActive)
 
-        await harness.model.openCodexCLI(for: account)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: workingDirectoryURL)
 
         XCTAssertEqual(oauthClient.refreshCallCount, 1)
         XCTAssertEqual(cliLauncher.launchCallCount, 1)
         XCTAssertEqual(cliLauncher.lastMode, .isolatedAccount(payload: refreshedPayload))
+        XCTAssertEqual(cliLauncher.lastWorkingDirectoryURL, workingDirectoryURL)
         XCTAssertEqual(try harness.credentialStore.load(for: accountID), refreshedPayload)
+        XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [workingDirectoryURL.path])
         XCTAssertTrue(harness.model.database.switchLogs.contains { $0.message.contains("打开 CLI 前已在线刷新账号") })
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 打开 Codex CLI。")
         XCTAssertFalse(harness.model.isLaunchingCLI(for: account.id))
@@ -608,12 +640,15 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.prepare()
         let account = try XCTUnwrap(harness.model.accounts.first)
+        let workingDirectoryURL = makeWorkingDirectoryURL("fallback-cli")
 
-        await harness.model.openCodexCLI(for: account)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: workingDirectoryURL)
 
         XCTAssertEqual(oauthClient.refreshCallCount, 1)
         XCTAssertEqual(cliLauncher.launchCallCount, 1)
         XCTAssertEqual(cliLauncher.lastMode, .isolatedAccount(payload: cachedPayload))
+        XCTAssertEqual(cliLauncher.lastWorkingDirectoryURL, workingDirectoryURL)
+        XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [workingDirectoryURL.path])
         XCTAssertTrue(harness.model.database.switchLogs.contains { $0.message.contains("打开 CLI 前在线刷新账号 Cached User 失败") })
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 打开 Codex CLI。")
         XCTAssertFalse(harness.model.isLaunchingCLI(for: account.id))
@@ -636,12 +671,15 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.prepare()
         let account = try XCTUnwrap(harness.model.accounts.first)
+        let workingDirectoryURL = makeWorkingDirectoryURL("apikey-cli")
 
-        await harness.model.openCodexCLI(for: account)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: workingDirectoryURL)
 
         XCTAssertEqual(oauthClient.refreshCallCount, 0)
         XCTAssertEqual(cliLauncher.launchCallCount, 1)
         XCTAssertEqual(cliLauncher.lastMode, .isolatedAccount(payload: cachedPayload))
+        XCTAssertEqual(cliLauncher.lastWorkingDirectoryURL, workingDirectoryURL)
+        XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [workingDirectoryURL.path])
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 打开 Codex CLI。")
         XCTAssertFalse(harness.model.isLaunchingCLI(for: account.id))
     }
@@ -663,11 +701,42 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.prepare()
         let account = try XCTUnwrap(harness.model.accounts.first)
+        let workingDirectoryURL = makeWorkingDirectoryURL("failed-cli")
 
-        await harness.model.openCodexCLI(for: account)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: workingDirectoryURL)
 
         XCTAssertEqual(harness.model.banner?.message, "打开 Codex CLI 失败：cli launch failed")
+        XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [])
         XCTAssertFalse(harness.model.isLaunchingCLI(for: account.id))
+    }
+
+    func testOpenCodexCLIRemembersDirectoriesMostRecentFirstWithoutDuplicates() async throws {
+        let accountID = UUID()
+        let cachedPayload = try makeAPIKeyPayload("sk-test-old")
+        let cliLauncher = RecordingCodexCLILauncher()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            cliLauncher: cliLauncher
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+        let firstDirectoryURL = makeWorkingDirectoryURL("first-cli")
+        let secondDirectoryURL = makeWorkingDirectoryURL("second-cli")
+
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: firstDirectoryURL)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: secondDirectoryURL)
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: firstDirectoryURL)
+
+        XCTAssertEqual(
+            harness.model.cliWorkingDirectories(for: account.id),
+            [firstDirectoryURL.path, secondDirectoryURL.path]
+        )
     }
 
     private func makeHarness(
@@ -681,7 +750,8 @@ final class AppViewModelTests: XCTestCase {
         quotaMonitor: any QuotaMonitoring = NoopQuotaMonitor(),
         userNotifier: any UserNotifying = RecordingUserNotifier(),
         instanceLauncher: any CodexInstanceLaunching = RecordingCodexInstanceLauncher(),
-        cliLauncher: any CodexCLILaunching = RecordingCodexCLILauncher()
+        cliLauncher: any CodexCLILaunching = RecordingCodexCLILauncher(),
+        bannerAutoDismissDuration: Duration = .seconds(10)
     ) async throws -> AppViewModelHarness {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -760,7 +830,8 @@ final class AppViewModelTests: XCTestCase {
             userNotifier: userNotifier,
             runtimeInspector: runtimeInspector,
             instanceLauncher: instanceLauncher,
-            cliLauncher: cliLauncher
+            cliLauncher: cliLauncher,
+            bannerAutoDismissDuration: bannerAutoDismissDuration
         )
 
         return AppViewModelHarness(
@@ -786,6 +857,10 @@ final class AppViewModelTests: XCTestCase {
 
     private func makeAPIKeyPayload(_ apiKey: String) throws -> CodexAuthPayload {
         try CodexAuthPayload(authMode: .apiKey, openAIAPIKey: apiKey).validated()
+    }
+
+    private func makeWorkingDirectoryURL(_ name: String) -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
     }
 
     private func makeSignedLikePayload(
@@ -1010,12 +1085,14 @@ private final class RecordingCodexCLILauncher: CodexCLILaunching {
     var launchCallCount = 0
     var lastAccountID: UUID?
     var lastMode: CodexCLILaunchMode?
+    var lastWorkingDirectoryURL: URL?
     var lastAppSupportDirectoryURL: URL?
     var error: Error?
 
     func launchCLI(
         for account: ManagedAccount,
         mode: CodexCLILaunchMode,
+        workingDirectoryURL: URL,
         appSupportDirectoryURL: URL
     ) throws {
         if let error {
@@ -1024,6 +1101,7 @@ private final class RecordingCodexCLILauncher: CodexCLILaunching {
         launchCallCount += 1
         lastAccountID = account.id
         lastMode = mode
+        lastWorkingDirectoryURL = workingDirectoryURL
         lastAppSupportDirectoryURL = appSupportDirectoryURL
     }
 }

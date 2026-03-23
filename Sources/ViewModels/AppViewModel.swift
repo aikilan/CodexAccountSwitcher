@@ -119,8 +119,10 @@ final class AppViewModel: ObservableObject {
     private let runtimeInspector: any CodexRuntimeInspecting
     private let instanceLauncher: any CodexInstanceLaunching
     private let cliLauncher: any CodexCLILaunching
+    private let bannerAutoDismissDuration: Duration
     private var browserSession: BrowserOAuthSession?
     private var browserWaitTask: Task<Void, Never>?
+    private var bannerDismissTask: Task<Void, Never>?
     private var hasLoaded = false
     private var isReconcilingCurrentAuth = false
     private var suppressActivationReconcileUntil: Date?
@@ -138,7 +140,8 @@ final class AppViewModel: ObservableObject {
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
         instanceLauncher: any CodexInstanceLaunching = CodexInstanceLauncher(),
-        cliLauncher: any CodexCLILaunching = CodexCLILauncher()
+        cliLauncher: any CodexCLILaunching = CodexCLILauncher(),
+        bannerAutoDismissDuration: Duration = .seconds(10)
     ) {
         self.paths = paths
         self.databaseStore = databaseStore
@@ -151,6 +154,7 @@ final class AppViewModel: ObservableObject {
         self.runtimeInspector = runtimeInspector
         self.instanceLauncher = instanceLauncher
         self.cliLauncher = cliLauncher
+        self.bannerAutoDismissDuration = bannerAutoDismissDuration
     }
 
     static func live() -> AppViewModel {
@@ -237,6 +241,10 @@ final class AppViewModel: ObservableObject {
 
     func snapshot(for accountID: UUID) -> QuotaSnapshot? {
         database.snapshot(for: accountID)
+    }
+
+    func cliWorkingDirectories(for accountID: UUID) -> [String] {
+        database.cliWorkingDirectories(for: accountID)
     }
 
     func shouldOfferRestartCodex(for account: ManagedAccount) -> Bool {
@@ -355,7 +363,7 @@ final class AppViewModel: ObservableObject {
         NSWorkspace.shared.open(paths.codexHome)
     }
 
-    func openCodexCLI(for account: ManagedAccount) async {
+    func openCodexCLI(for account: ManagedAccount, workingDirectoryURL: URL) async {
         guard launchingCLIAccountID == nil else { return }
         launchingCLIAccountID = account.id
         defer {
@@ -369,8 +377,11 @@ final class AppViewModel: ObservableObject {
                 try cliLauncher.launchCLI(
                     for: account,
                     mode: .globalCurrentAuth,
+                    workingDirectoryURL: workingDirectoryURL,
                     appSupportDirectoryURL: paths.appSupportDirectoryURL
                 )
+                database.rememberCLIWorkingDirectory(workingDirectoryURL, for: account.id)
+                try? await persistDatabase()
                 pushBanner(level: .info, message: "已为账号 \(account.displayName) 打开 Codex CLI。")
                 return
             }
@@ -395,8 +406,11 @@ final class AppViewModel: ObservableObject {
             try cliLauncher.launchCLI(
                 for: account,
                 mode: .isolatedAccount(payload: payload),
+                workingDirectoryURL: workingDirectoryURL,
                 appSupportDirectoryURL: paths.appSupportDirectoryURL
             )
+            database.rememberCLIWorkingDirectory(workingDirectoryURL, for: account.id)
+            try? await persistDatabase()
             pushBanner(level: .info, message: "已为账号 \(account.displayName) 打开 Codex CLI。")
         } catch {
             pushBanner(level: .error, message: "打开 Codex CLI 失败：\(error.localizedDescription)")
@@ -1054,6 +1068,16 @@ final class AppViewModel: ObservableObject {
     private func pushBanner(level: SwitchLogLevel, message: String, action: BannerAction? = nil) {
         banner = BannerState(level: level, message: message, action: action)
         database.appendLog(level: level, message: message)
+        bannerDismissTask?.cancel()
+        let currentMessage = message
+        bannerDismissTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.bannerAutoDismissDuration)
+            guard !Task.isCancelled else { return }
+            if self.banner?.message == currentMessage {
+                self.banner = nil
+            }
+        }
         Task {
             try? await persistDatabase()
         }

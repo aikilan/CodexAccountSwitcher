@@ -28,19 +28,21 @@ struct CodexCLILauncher {
     func launchCLI(
         for account: ManagedAccount,
         mode: CodexCLILaunchMode,
+        workingDirectoryURL: URL,
         appSupportDirectoryURL: URL
     ) throws {
         let command: String
+        let prefix = "cd \(shellQuoted(workingDirectoryURL.standardizedFileURL.path)) && "
 
         switch mode {
         case .globalCurrentAuth:
-            command = "codex"
+            command = prefix + "codex"
         case let .isolatedAccount(payload):
             let codexHomeURL = isolatedCodexHomeURL(for: account, appSupportDirectoryURL: appSupportDirectoryURL)
             try fileManager.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
             let authFileURL = codexHomeURL.appendingPathComponent("auth.json")
             try AuthFileManager(authFileURL: authFileURL, fileManager: fileManager).activate(payload)
-            command = "env CODEX_HOME=\(shellQuoted(codexHomeURL.path)) codex"
+            command = prefix + "env CODEX_HOME=\(shellQuoted(codexHomeURL.path)) codex"
         }
 
         try runAppleScript(appleScriptLines(for: command))

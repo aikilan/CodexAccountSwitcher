@@ -15,10 +15,12 @@ final class CodexCLILauncherTests: XCTestCase {
                 capturedLines = lines
             }
         )
+        let workingDirectoryURL = appSupport.appendingPathComponent("workspace", isDirectory: true)
 
         try launcher.launchCLI(
             for: makeAccount(),
             mode: .globalCurrentAuth,
+            workingDirectoryURL: workingDirectoryURL,
             appSupportDirectoryURL: appSupport
         )
 
@@ -27,7 +29,7 @@ final class CodexCLILauncherTests: XCTestCase {
             [
                 "tell application \"Terminal\"",
                 "activate",
-                "do script \"codex\"",
+                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && codex\"",
                 "end tell",
             ]
         )
@@ -47,6 +49,7 @@ final class CodexCLILauncherTests: XCTestCase {
         )
         let account = makeAccount()
         let payload = makePayload(accountID: "acct_cli", refreshToken: "refresh_cli")
+        let workingDirectoryURL = appSupport.appendingPathComponent("workspace", isDirectory: true)
         let codexHomeURL = appSupport
             .appendingPathComponent("isolated-codex-instances", isDirectory: true)
             .appendingPathComponent(account.id.uuidString, isDirectory: true)
@@ -55,6 +58,7 @@ final class CodexCLILauncherTests: XCTestCase {
         try launcher.launchCLI(
             for: account,
             mode: .isolatedAccount(payload: payload),
+            workingDirectoryURL: workingDirectoryURL,
             appSupportDirectoryURL: appSupport
         )
 
@@ -67,7 +71,7 @@ final class CodexCLILauncherTests: XCTestCase {
             [
                 "tell application \"Terminal\"",
                 "activate",
-                "do script \"env CODEX_HOME=\\\"\(codexHomeURL.path)\\\" codex\"",
+                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && env CODEX_HOME=\\\"\(codexHomeURL.path)\\\" codex\"",
                 "end tell",
             ]
         )
@@ -87,6 +91,7 @@ final class CodexCLILauncherTests: XCTestCase {
             try launcher.launchCLI(
                 for: makeAccount(),
                 mode: .globalCurrentAuth,
+                workingDirectoryURL: appSupport,
                 appSupportDirectoryURL: appSupport
             )
         ) { error in

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -215,36 +216,43 @@ private struct AccountDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                quickActionSection
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 24) {
+                    quickActionSection
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("账号详情")
-                        .font(.largeTitle.bold())
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("账号详情")
+                            .font(.largeTitle.bold())
 
-                    HStack(alignment: .center, spacing: 12) {
-                        TextField("显示名", text: $draftName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 280)
-                        Button("保存名称") {
-                            onRename(draftName)
+                        HStack(alignment: .center, spacing: 12) {
+                            TextField("显示名", text: $draftName)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 280)
+                            Button("保存名称") {
+                                onRename(draftName)
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
+
+                        infoGrid
                     }
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                    infoGrid
+                    quotaSection
+
+                    statusSection
+
+                    pathSection
+
+                    deleteSection
                 }
-                .padding(24)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                quotaSection
-
-                statusSection
-
-                pathSection
-
-                deleteSection
+                cliDirectoryHistorySection
+                    .frame(width: 320, alignment: .topLeading)
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .padding(24)
         }
         .onAppear {
@@ -397,8 +405,8 @@ private struct AccountDetailView: View {
                         || model.isSwitchInProgress
                 )
 
-                Button(model.isLaunchingCLI(for: account.id) ? "正在打开 CLI..." : "打开 Codex CLI") {
-                    Task { await model.openCodexCLI(for: account) }
+                Button(model.isLaunchingCLI(for: account.id) ? "正在打开 CLI..." : "选择目录并打开 CLI") {
+                    chooseDirectoryAndOpenCLI()
                 }
                 .buttonStyle(.bordered)
                 .disabled(
@@ -422,6 +430,36 @@ private struct AccountDetailView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .padding(20)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var cliDirectoryHistorySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("已打开目录")
+                .font(.title2.bold())
+
+            if recentCLIDirectories.isEmpty {
+                Text("还没有打开过目录。先选择一个目录打开 CLI，后续就能从这里快速启动。")
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(recentCLIDirectories, id: \.self) { path in
+                        CLIDirectoryHistoryCard(
+                            path: path,
+                            isDisabled: model.isLaunchingCLI(for: account.id)
+                                || model.isLaunchingIsolatedInstance(for: account.id)
+                                || model.isSwitchInProgress,
+                            onOpen: {
+                                launchCLI(in: URL(fileURLWithPath: path, isDirectory: true))
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var deleteSection: some View {
@@ -473,6 +511,32 @@ private struct AccountDetailView: View {
         return "启动独立实例"
     }
 
+    private var recentCLIDirectories: [String] {
+        model.cliWorkingDirectories(for: account.id)
+    }
+
+    private func chooseDirectoryAndOpenCLI() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "打开 CLI"
+        panel.message = "选择一个目录作为 Codex CLI 的启动目录。"
+        if let path = recentCLIDirectories.first {
+            panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        }
+
+        guard panel.runModal() == .OK, let directoryURL = panel.url else { return }
+        launchCLI(in: directoryURL)
+    }
+
+    private func launchCLI(in directoryURL: URL) {
+        Task {
+            await model.openCodexCLI(for: account, workingDirectoryURL: directoryURL)
+        }
+    }
+
     private var pathSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("当前写入路径")
@@ -493,6 +557,64 @@ private struct AccountDetailView: View {
         case .error:
             return Color.red.opacity(0.12)
         }
+    }
+}
+
+private struct CLIDirectoryHistoryCard: View {
+    let path: String
+    let isDisabled: Bool
+    let onOpen: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(URL(fileURLWithPath: path).lastPathComponent)
+                        .font(.headline)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 8)
+
+                    Text("点击启动 CLI")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(isDisabled ? .tertiary : .secondary)
+                }
+
+                Text(path)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(backgroundColor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(overlayColor, lineWidth: isHovering && !isDisabled ? 1 : 0)
+            )
+            .scaleEffect(isHovering && !isDisabled ? 1.01 : 1)
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .disabled(isDisabled)
+        .help(isDisabled ? "当前不可点击" : "点击快速启动 CLI")
+        .onHover { hovering in
+            isHovering = hovering
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isDisabled {
+            return Color.secondary.opacity(0.08)
+        }
+        return isHovering ? Color.accentColor.opacity(0.16) : Color.accentColor.opacity(0.08)
+    }
+
+    private var overlayColor: Color {
+        Color.accentColor.opacity(0.35)
     }
 }
 

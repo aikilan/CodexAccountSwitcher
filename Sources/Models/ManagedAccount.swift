@@ -87,15 +87,17 @@ struct AppDatabase: Codable, Sendable {
     var accounts: [ManagedAccount]
     var quotaSnapshots: [String: QuotaSnapshot]
     var switchLogs: [SwitchLogEntry]
+    var cliWorkingDirectoriesByAccountID: [String: [String]] = [:]
     var activeAccountID: UUID?
 
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     static let empty = AppDatabase(
         version: currentVersion,
         accounts: [],
         quotaSnapshots: [:],
         switchLogs: [],
+        cliWorkingDirectoriesByAccountID: [:],
         activeAccountID: nil
     )
 
@@ -106,6 +108,10 @@ struct AppDatabase: Codable, Sendable {
 
     func snapshot(for accountID: UUID) -> QuotaSnapshot? {
         quotaSnapshots[accountID.uuidString]
+    }
+
+    func cliWorkingDirectories(for accountID: UUID) -> [String] {
+        cliWorkingDirectoriesByAccountID[accountID.uuidString] ?? []
     }
 
     mutating func setActiveAccount(_ id: UUID?) {
@@ -130,6 +136,7 @@ struct AppDatabase: Codable, Sendable {
     mutating func removeAccount(id: UUID) {
         accounts.removeAll(where: { $0.id == id })
         quotaSnapshots.removeValue(forKey: id.uuidString)
+        cliWorkingDirectoriesByAccountID.removeValue(forKey: id.uuidString)
         if activeAccountID == id {
             activeAccountID = nil
         }
@@ -149,5 +156,47 @@ struct AppDatabase: Codable, Sendable {
         if switchLogs.count > 200 {
             switchLogs = Array(switchLogs.prefix(200))
         }
+    }
+
+    mutating func rememberCLIWorkingDirectory(_ directoryURL: URL, for accountID: UUID) {
+        let normalizedPath = directoryURL.standardizedFileURL.path
+        let key = accountID.uuidString
+        var directories = cliWorkingDirectoriesByAccountID[key] ?? []
+        directories.removeAll(where: { $0 == normalizedPath })
+        directories.insert(normalizedPath, at: 0)
+        if directories.count > 8 {
+            directories = Array(directories.prefix(8))
+        }
+        cliWorkingDirectoriesByAccountID[key] = directories
+    }
+}
+
+extension AppDatabase {
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case accounts
+        case quotaSnapshots
+        case switchLogs
+        case cliWorkingDirectoriesByAccountID
+        case activeAccountID
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        let accounts = try container.decodeIfPresent([ManagedAccount].self, forKey: .accounts) ?? []
+        let quotaSnapshots = try container.decodeIfPresent([String: QuotaSnapshot].self, forKey: .quotaSnapshots) ?? [:]
+        let switchLogs = try container.decodeIfPresent([SwitchLogEntry].self, forKey: .switchLogs) ?? []
+        let cliWorkingDirectoriesByAccountID = try container.decodeIfPresent([String: [String]].self, forKey: .cliWorkingDirectoriesByAccountID) ?? [:]
+        let activeAccountID = try container.decodeIfPresent(UUID.self, forKey: .activeAccountID)
+
+        self.init(
+            version: version,
+            accounts: accounts,
+            quotaSnapshots: quotaSnapshots,
+            switchLogs: switchLogs,
+            cliWorkingDirectoriesByAccountID: cliWorkingDirectoriesByAccountID,
+            activeAccountID: activeAccountID
+        )
     }
 }

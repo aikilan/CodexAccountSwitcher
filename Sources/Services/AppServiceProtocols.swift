@@ -71,6 +71,7 @@ protocol CodexCLILaunching {
     func launchCLI(
         for account: ManagedAccount,
         mode: CodexCLILaunchMode,
+        workingDirectoryURL: URL,
         appSupportDirectoryURL: URL
     ) throws
 }
