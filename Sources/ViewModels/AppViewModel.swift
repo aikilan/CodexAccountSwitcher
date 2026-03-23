@@ -104,6 +104,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var pendingRestartPromptMessage: String?
     @Published private(set) var lowQuotaSwitchRecommendation: LowQuotaSwitchRecommendation?
     @Published private(set) var launchingIsolatedInstanceAccountID: UUID?
+    @Published private(set) var launchedIsolatedInstanceAccountIDs: Set<UUID> = []
     @Published private(set) var launchingCLIAccountID: UUID?
 
     let paths: AppPaths
@@ -218,12 +219,16 @@ final class AppViewModel: ObservableObject {
         launchingIsolatedInstanceAccountID == accountID
     }
 
+    func hasLaunchedIsolatedInstance(for accountID: UUID) -> Bool {
+        launchedIsolatedInstanceAccountIDs.contains(accountID)
+    }
+
     func isLaunchingCLI(for accountID: UUID) -> Bool {
         launchingCLIAccountID == accountID
     }
 
     func canLaunchIsolatedCodex(for account: ManagedAccount) -> Bool {
-        !(account.isActive && account.authMode == .chatgpt)
+        !(account.isActive && account.authMode == .chatgpt) && !hasLaunchedIsolatedInstance(for: account.id)
     }
 
     var isSwitchInProgress: Bool {
@@ -399,6 +404,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func launchIsolatedCodex(for account: ManagedAccount) async {
+        if hasLaunchedIsolatedInstance(for: account.id) {
+            pushBanner(level: .info, message: "账号 \(account.displayName) 的独立实例已在当前会话中启动。")
+            return
+        }
         guard canLaunchIsolatedCodex(for: account) else {
             pushBanner(level: .error, message: "当前活跃的 ChatGPT 账号不能直接启动独立实例，避免触发 refresh_token_reused。")
             return
@@ -442,6 +451,7 @@ final class AppViewModel: ObservableObject {
                 payload: payload,
                 appSupportDirectoryURL: paths.appSupportDirectoryURL
             )
+            launchedIsolatedInstanceAccountIDs.insert(account.id)
             pushBanner(level: .info, message: "已为账号 \(account.displayName) 启动独立 Codex 实例。")
         } catch {
             pushBanner(level: .error, message: "启动独立 Codex 实例失败：\(error.localizedDescription)")

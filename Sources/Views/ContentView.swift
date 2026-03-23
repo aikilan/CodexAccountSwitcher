@@ -216,6 +216,8 @@ private struct AccountDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                quickActionSection
+
                 VStack(alignment: .leading, spacing: 12) {
                     Text("账号详情")
                         .font(.largeTitle.bold())
@@ -239,9 +241,9 @@ private struct AccountDetailView: View {
 
                 statusSection
 
-                actionSection
-
                 pathSection
+
+                deleteSection
             }
             .padding(24)
         }
@@ -366,9 +368,9 @@ private struct AccountDetailView: View {
         }
     }
 
-    private var actionSection: some View {
+    private var quickActionSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("操作")
+            Text("快捷操作")
                 .font(.title2.bold())
 
             HStack {
@@ -384,7 +386,7 @@ private struct AccountDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
 
-                Button(model.isLaunchingIsolatedInstance(for: account.id) ? "正在启动独立实例..." : "启动独立实例") {
+                Button(isolatedInstanceButtonTitle) {
                     Task { await model.launchIsolatedCodex(for: account) }
                 }
                 .buttonStyle(.bordered)
@@ -414,17 +416,24 @@ private struct AccountDetailView: View {
                     .buttonStyle(.bordered)
                     .disabled(model.isRestartingCodex)
                 }
-
-                Button("删除账号", role: .destructive) {
-                    onDelete()
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
             }
 
             Text(isolatedLaunchHelpText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private var deleteSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("删除账号")
+                .font(.title2.bold())
+
+            Button("删除账号", role: .destructive) {
+                onDelete()
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
         }
     }
 
@@ -442,6 +451,9 @@ private struct AccountDetailView: View {
     }
 
     private var isolatedLaunchHelpText: String {
+        if model.hasLaunchedIsolatedInstance(for: account.id) {
+            return "该账号的独立实例已在当前会话中启动，为避免重复拉起，当前已禁用再次启动。"
+        }
         if account.isActive && account.authMode == .chatgpt {
             return "打开 CLI 会直接使用当前 ~/.codex；当前活跃的 ChatGPT 账号不能再起独立实例，避免触发 refresh_token_reused。"
         }
@@ -449,6 +461,16 @@ private struct AccountDetailView: View {
             return "打开 CLI 会直接使用当前 ~/.codex；独立实例仍会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。"
         }
         return "打开 CLI 时会为该账号使用独立 CODEX_HOME；独立实例也会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。"
+    }
+
+    private var isolatedInstanceButtonTitle: String {
+        if model.isLaunchingIsolatedInstance(for: account.id) {
+            return "正在启动独立实例..."
+        }
+        if model.hasLaunchedIsolatedInstance(for: account.id) {
+            return "独立实例已启动"
+        }
+        return "启动独立实例"
     }
 
     private var pathSection: some View {

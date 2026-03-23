@@ -409,6 +409,8 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(launcher.lastPayload, cachedPayload)
         XCTAssertEqual(try harness.credentialStore.load(for: accountID), cachedPayload)
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 启动独立 Codex 实例。")
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+        XCTAssertFalse(harness.model.canLaunchIsolatedCodex(for: account))
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
     }
 
@@ -454,6 +456,8 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(try harness.credentialStore.load(for: accountID), refreshedPayload)
         XCTAssertTrue(harness.model.database.switchLogs.contains { $0.message.contains("独立实例启动前已在线刷新账号") })
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 启动独立 Codex 实例。")
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+        XCTAssertFalse(harness.model.canLaunchIsolatedCodex(for: account))
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
     }
 
@@ -482,7 +486,35 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(launcher.lastPayload, cachedPayload)
         XCTAssertTrue(harness.model.database.switchLogs.contains { $0.message.contains("独立实例启动前在线刷新账号 Cached User 失败") })
         XCTAssertEqual(harness.model.banner?.message, "已为账号 \(account.displayName) 启动独立 Codex 实例。")
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+        XCTAssertFalse(harness.model.canLaunchIsolatedCodex(for: account))
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
+    }
+
+    func testLaunchIsolatedCodexBlocksRepeatedLaunchAfterSuccess() async throws {
+        let accountID = UUID()
+        let cachedPayload = try makeAPIKeyPayload("sk-test-old")
+        let launcher = RecordingCodexInstanceLauncher()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            instanceLauncher: launcher
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.launchIsolatedCodex(for: account)
+        await harness.model.launchIsolatedCodex(for: account)
+
+        XCTAssertEqual(launcher.launchCallCount, 1)
+        XCTAssertEqual(harness.model.banner?.message, "账号 \(account.displayName) 的独立实例已在当前会话中启动。")
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+        XCTAssertFalse(harness.model.canLaunchIsolatedCodex(for: account))
     }
 
     func testOpenCodexCLIUsesGlobalAuthForActiveAccountWithoutRefresh() async throws {
