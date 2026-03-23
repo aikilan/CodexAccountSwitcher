@@ -1,0 +1,645 @@
+import Foundation
+import XCTest
+@testable import CodexAccountSwitcher
+
+@MainActor
+final class AppViewModelTests: XCTestCase {
+    func testSwitchToAccountUsesRefreshedPayloadWhenRefreshSucceeds() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let refreshedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_new")
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(
+                refreshResult: .success(
+                    AuthLoginResult(
+                        payload: refreshedPayload,
+                        identity: AuthIdentity(
+                            accountID: "acct_cached",
+                            displayName: "Refreshed User",
+                            email: "refresh@example.com",
+                            planType: "plus"
+                        )
+                    )
+                )
+            ),
+            runtimeInspector: MockRuntimeInspector(result: .verified)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.switchToAccount(account)
+
+        XCTAssertEqual(harness.authFileManager.activatedPayloads.last?.tokens.refreshToken, "refresh_new")
+        XCTAssertEqual(try harness.credentialStore.load(for: accountID).tokens.refreshToken, "refresh_new")
+        XCTAssertEqual(harness.model.activeAccount?.id, accountID)
+    }
+
+    func testSwitchToAccountFallsBackToCachedPayloadWhenRefreshFails() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.switchToAccount(account)
+
+        XCTAssertEqual(harness.authFileManager.activatedPayloads.last?.tokens.refreshToken, "refresh_old")
+        XCTAssertTrue(harness.model.database.switchLogs.contains { $0.message.contains("已回退本地缓存凭据") })
+    }
+
+    func testSwitchToAccountOffersRestartActionWhenHotReloadNeedsRestart() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .authError(.refreshTokenReused), isRunning: true)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.switchToAccount(account)
+
+        XCTAssertEqual(harness.model.banner?.action, .restartCodex)
+        XCTAssertTrue(harness.model.shouldOfferRestartCodex(for: account))
+        XCTAssertTrue(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertEqual(
+            harness.model.restartPromptMessage,
+            "auth.json 已更新，但运行中的 Codex 仍持有旧授权并触发 refresh_token_reused，建议重启 Codex。"
+        )
+    }
+
+    func testRefreshAccountStatusFormatsQuotaAsRemainingPercent() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let refreshedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_new")
+        let usageSnapshot = QuotaSnapshot(
+            primary: RateLimitWindowSnapshot(usedPercent: 0, windowMinutes: 300, resetsAt: Date(timeIntervalSince1970: 1_773_908_626)),
+            secondary: RateLimitWindowSnapshot(usedPercent: 32, windowMinutes: 10080, resetsAt: Date(timeIntervalSince1970: 1_774_017_140)),
+            credits: nil,
+            planType: "team",
+            capturedAt: Date(),
+            source: .onlineUsageRefresh
+        )
+        let subscriptionDetails = SubscriptionDetails(
+            allowed: true,
+            limitReached: false
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(
+                refreshResult: .success(
+                    AuthLoginResult(
+                        payload: refreshedPayload,
+                        identity: AuthIdentity(
+                            accountID: "acct_cached",
+                            displayName: "Refreshed User",
+                            email: "refresh@example.com",
+                            planType: "team"
+                        )
+                    )
+                ),
+                usageResult: .success(
+                    UsageRefreshResult(
+                        snapshot: usageSnapshot,
+                        email: "refresh@example.com",
+                        planType: "team",
+                        allowed: true,
+                        limitReached: false,
+                        subscriptionDetails: subscriptionDetails
+                    )
+                )
+            ),
+            runtimeInspector: MockRuntimeInspector(result: .verified)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.refreshAccountStatus(account)
+
+        let refreshedAccount = try XCTUnwrap(harness.model.accounts.first)
+        let snapshot = try XCTUnwrap(harness.model.snapshot(for: accountID))
+        XCTAssertEqual(snapshot.primary.remainingPercentText, "100%")
+        XCTAssertEqual(snapshot.secondary.remainingPercentText, "68%")
+        XCTAssertEqual(refreshedAccount.lastStatusMessage, "状态与额度已更新：剩余 5h 100% / 7d 68%。")
+        XCTAssertEqual(refreshedAccount.subscriptionDetails?.allowed, true)
+        XCTAssertEqual(refreshedAccount.subscriptionDetails?.limitReached, false)
+    }
+
+    func testReconcileCurrentAuthStateAlignsActiveAccountWithAuthFile() async throws {
+        let currentAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: currentAccountID
+        )
+
+        await harness.model.prepare()
+        XCTAssertEqual(harness.model.activeAccount?.id, currentAccountID)
+
+        harness.authFileManager.currentAuth = makeSignedLikePayload(
+            accountID: "acct_actual",
+            refreshToken: "refresh_actual",
+            displayName: "Actual User",
+            email: "actual@example.com",
+            planType: "team"
+        )
+
+        await harness.model.reconcileCurrentAuthState()
+
+        XCTAssertEqual(harness.model.activeAccount?.codexAccountID, "acct_actual")
+        XCTAssertEqual(harness.model.selectedAccount?.codexAccountID, "acct_actual")
+    }
+
+    func testProgrammaticActivationSkipsAuthReconcile() async throws {
+        let currentAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: currentAccountID
+        )
+
+        await harness.model.prepare()
+        harness.authFileManager.currentAuth = makeSignedLikePayload(
+            accountID: "acct_actual",
+            refreshToken: "refresh_actual",
+            displayName: "Actual User",
+            email: "actual@example.com",
+            planType: "team"
+        )
+
+        harness.model.noteProgrammaticActivation(gracePeriod: 60)
+        await harness.model.reconcileCurrentAuthStateForAppActivation()
+
+        XCTAssertEqual(harness.model.activeAccount?.codexAccountID, "acct_cached")
+    }
+
+    func testDismissRestartPromptClearsMenuBarPromptState() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .authError(.refreshTokenReused), isRunning: true)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+        await harness.model.switchToAccount(account)
+
+        harness.model.dismissRestartPrompt()
+
+        XCTAssertFalse(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertNil(harness.model.banner)
+    }
+
+    func testRestartPromptMessageSurvivesUnrelatedBannerUpdates() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .authError(.refreshTokenReused), isRunning: true)
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+        await harness.model.switchToAccount(account)
+
+        harness.model.banner = BannerState(level: .info, message: "其他提示")
+
+        XCTAssertTrue(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertEqual(
+            harness.model.restartPromptMessage,
+            "auth.json 已更新，但运行中的 Codex 仍持有旧授权并触发 refresh_token_reused，建议重启 Codex。"
+        )
+    }
+
+    func testStartAPIKeyLoginCreatesAndActivatesAPIKeyAccount() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        )
+
+        await harness.model.prepare()
+        harness.model.apiKeyInput = "sk-test-api-key"
+        harness.model.apiKeyDisplayName = "API 测试账号"
+
+        await harness.model.startAPIKeyLogin()
+
+        XCTAssertEqual(harness.model.activeAccount?.authMode, .apiKey)
+        XCTAssertEqual(harness.model.activeAccount?.displayName, "API 测试账号")
+        XCTAssertEqual(harness.authFileManager.activatedPayloads.last?.authMode, .apiKey)
+        XCTAssertEqual(harness.authFileManager.activatedPayloads.last?.openAIAPIKey, "sk-test-api-key")
+    }
+
+    func testLowQuotaRecommendationNotifiesAndSupportsQuickSwitch() async throws {
+        let activeAccountID = UUID()
+        let candidateAccountID = UUID()
+        let activePayload = makePayload(accountID: "acct_active", refreshToken: "refresh_active")
+        let candidatePayload = makePayload(accountID: "acct_candidate", refreshToken: "refresh_candidate")
+        let quotaMonitor = ControllableQuotaMonitor()
+        let notifier = RecordingUserNotifier()
+        let candidateSnapshot = QuotaSnapshot(
+            primary: RateLimitWindowSnapshot(usedPercent: 12, windowMinutes: 300, resetsAt: nil),
+            secondary: RateLimitWindowSnapshot(usedPercent: 22, windowMinutes: 10080, resetsAt: nil),
+            credits: nil,
+            planType: "plus",
+            capturedAt: Date(),
+            source: .onlineUsageRefresh
+        )
+
+        let harness = try await makeHarness(
+            accountID: activeAccountID,
+            cachedPayload: activePayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false),
+            activeAccountID: activeAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: candidateAccountID,
+                        codexAccountID: candidatePayload.accountIdentifier,
+                        displayName: "Candidate User",
+                        email: "candidate@example.com",
+                        authMode: candidatePayload.authMode,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: candidateSnapshot.capturedAt,
+                        lastRefreshAt: Date(),
+                        planType: "plus",
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: false
+                    ),
+                    payload: candidatePayload,
+                    snapshot: candidateSnapshot
+                )
+            ],
+            quotaMonitor: quotaMonitor,
+            userNotifier: notifier
+        )
+
+        await harness.model.prepare()
+
+        let lowSnapshot = QuotaSnapshot(
+            primary: RateLimitWindowSnapshot(usedPercent: 91, windowMinutes: 300, resetsAt: nil),
+            secondary: RateLimitWindowSnapshot(usedPercent: 35, windowMinutes: 10080, resetsAt: nil),
+            credits: nil,
+            planType: "plus",
+            capturedAt: Date(),
+            source: .sessionTokenCount
+        )
+
+        quotaMonitor.emitSnapshot(accountID: activeAccountID, snapshot: lowSnapshot)
+        await Task.yield()
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(harness.model.lowQuotaSwitchRecommendation?.recommendedAccountID, candidateAccountID)
+        XCTAssertEqual(harness.model.lowQuotaSwitchRecommendation?.recommendedAccountName, "Candidate User")
+        let notifications = await notifier.notifications
+        XCTAssertEqual(notifications.count, 1)
+        XCTAssertEqual(notifications.first?.identifier, "\(activeAccountID.uuidString)|\(candidateAccountID.uuidString)")
+        XCTAssertTrue(notifications.first?.body.contains("Candidate User") == true)
+
+        await harness.model.switchToRecommendedLowQuotaAccount()
+
+        XCTAssertEqual(harness.model.activeAccount?.id, candidateAccountID)
+        XCTAssertNil(harness.model.lowQuotaSwitchRecommendation)
+    }
+
+    private func makeHarness(
+        accountID: UUID,
+        cachedPayload: CodexAuthPayload,
+        authFileManager: RecordingAuthFileManager,
+        oauthClient: MockOAuthClient,
+        runtimeInspector: MockRuntimeInspector,
+        activeAccountID: UUID? = nil,
+        extraSeeds: [AccountSeed] = [],
+        quotaMonitor: any QuotaMonitoring = NoopQuotaMonitor(),
+        userNotifier: any UserNotifying = RecordingUserNotifier()
+    ) async throws -> AppViewModelHarness {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let codexHome = root.appendingPathComponent("codex-home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+        try fileManager.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let paths = try AppPaths(fileManager: fileManager, codexHomeOverride: codexHome, appSupportOverride: appSupport)
+        let databaseStore = AppDatabaseStore(databaseURL: paths.databaseURL)
+        let credentialStore = InMemoryCredentialStore()
+        try credentialStore.save(cachedPayload, for: accountID)
+
+        let account = ManagedAccount(
+            id: accountID,
+            codexAccountID: cachedPayload.accountIdentifier,
+            displayName: "Cached User",
+            email: cachedPayload.authMode == .apiKey ? cachedPayload.credentialSummary : "cached@example.com",
+            authMode: cachedPayload.authMode,
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        for seed in extraSeeds {
+            try credentialStore.save(seed.payload, for: seed.account.id)
+        }
+        try await databaseStore.save(AppDatabase(
+            version: AppDatabase.currentVersion,
+            accounts: [account] + extraSeeds.map(\.account),
+            quotaSnapshots: Dictionary(uniqueKeysWithValues: extraSeeds.compactMap { seed in
+                guard let snapshot = seed.snapshot else { return nil }
+                return (seed.account.id.uuidString, snapshot)
+            }),
+            switchLogs: [],
+            activeAccountID: activeAccountID
+        ))
+
+        let model = AppViewModel(
+            paths: paths,
+            databaseStore: databaseStore,
+            credentialStore: credentialStore,
+            authFileManager: authFileManager,
+            jwtDecoder: JWTClaimsDecoder(),
+            oauthClient: oauthClient,
+            quotaMonitor: quotaMonitor,
+            userNotifier: userNotifier,
+            runtimeInspector: runtimeInspector
+        )
+
+        return AppViewModelHarness(
+            model: model,
+            credentialStore: credentialStore,
+            authFileManager: authFileManager,
+            quotaMonitor: quotaMonitor,
+            userNotifier: userNotifier
+        )
+    }
+
+    private func makePayload(accountID: String, refreshToken: String) -> CodexAuthPayload {
+        CodexAuthPayload(
+            tokens: CodexTokenBundle(
+                idToken: "id_\(accountID)",
+                accessToken: "access_\(accountID)",
+                refreshToken: refreshToken,
+                accountID: accountID
+            ),
+            lastRefresh: CodexDateCoding.string(from: Date())
+        )
+    }
+
+    private func makeSignedLikePayload(
+        accountID: String,
+        refreshToken: String,
+        displayName: String,
+        email: String,
+        planType: String
+    ) -> CodexAuthPayload {
+        CodexAuthPayload(
+            tokens: CodexTokenBundle(
+                idToken: Self.makeUnsignedJWT(claims: [
+                    "name": displayName,
+                    "email": email,
+                    "https://api.openai.com/auth": [
+                        "chatgpt_account_id": accountID,
+                        "chatgpt_plan_type": planType,
+                    ],
+                ]),
+                accessToken: Self.makeUnsignedJWT(claims: [
+                    "https://api.openai.com/auth": [
+                        "chatgpt_account_id": accountID,
+                    ],
+                ]),
+                refreshToken: refreshToken,
+                accountID: accountID
+            ),
+            lastRefresh: CodexDateCoding.string(from: Date())
+        )
+    }
+
+    private static func makeUnsignedJWT(claims: [String: Any]) -> String {
+        func encode(_ object: Any) -> String {
+            let data = try! JSONSerialization.data(withJSONObject: object)
+            return data
+                .base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+
+        return "\(encode(["alg": "none"]))" + "." + encode(claims) + ".signature"
+    }
+}
+
+private struct AccountSeed {
+    let account: ManagedAccount
+    let payload: CodexAuthPayload
+    let snapshot: QuotaSnapshot?
+}
+
+private struct AppViewModelHarness {
+    let model: AppViewModel
+    let credentialStore: InMemoryCredentialStore
+    let authFileManager: RecordingAuthFileManager
+    let quotaMonitor: any QuotaMonitoring
+    let userNotifier: any UserNotifying
+}
+
+private final class RecordingAuthFileManager: AuthFileManaging {
+    private(set) var activatedPayloads: [CodexAuthPayload] = []
+    var currentAuth: CodexAuthPayload?
+
+    func readCurrentAuth() throws -> CodexAuthPayload? {
+        currentAuth
+    }
+
+    func activate(_ payload: CodexAuthPayload) throws {
+        try activatePreservingFileIdentity(payload)
+    }
+
+    func activatePreservingFileIdentity(_ payload: CodexAuthPayload) throws {
+        currentAuth = payload
+        activatedPayloads.append(payload)
+    }
+
+    func clearAuthFile() throws {
+        currentAuth = nil
+    }
+}
+
+private final class MockOAuthClient: @unchecked Sendable, OAuthClienting {
+    let refreshResult: Result<AuthLoginResult, Error>
+    let usageResult: Result<UsageRefreshResult, Error>
+
+    init(
+        refreshResult: Result<AuthLoginResult, Error>,
+        usageResult: Result<UsageRefreshResult, Error> = .failure(MockError.unused)
+    ) {
+        self.refreshResult = refreshResult
+        self.usageResult = usageResult
+    }
+
+    func beginBrowserLogin(openURL: @escaping @Sendable (URL) -> Bool) async throws -> BrowserOAuthSession {
+        throw MockError.unused
+    }
+
+    func completeBrowserLogin(session: BrowserOAuthSession) async throws -> AuthLoginResult {
+        throw MockError.unused
+    }
+
+    func completeBrowserLogin(session: BrowserOAuthSession, pastedInput: String) async throws -> AuthLoginResult {
+        throw MockError.unused
+    }
+
+    func startDeviceCodeLogin() async throws -> DeviceCodeChallenge {
+        throw MockError.unused
+    }
+
+    func pollDeviceCodeLogin(challenge: DeviceCodeChallenge) async throws -> AuthLoginResult {
+        throw MockError.unused
+    }
+
+    func refreshAuth(using payload: CodexAuthPayload) async throws -> AuthLoginResult {
+        try refreshResult.get()
+    }
+
+    func fetchUsageSnapshot(using payload: CodexAuthPayload) async throws -> UsageRefreshResult {
+        try usageResult.get()
+    }
+}
+
+private final class NoopQuotaMonitor: QuotaMonitoring {
+    func bootstrapSnapshot() -> QuotaSnapshot? { nil }
+    func start(
+        onSnapshot: @escaping (UUID, QuotaSnapshot) -> Void,
+        onSignal: @escaping (UUID, Date) -> Void
+    ) {}
+    func setActiveAccountID(_ accountID: UUID?) {}
+    func stop() {}
+}
+
+private final class ControllableQuotaMonitor: QuotaMonitoring {
+    private var snapshotHandler: ((UUID, QuotaSnapshot) -> Void)?
+    private var signalHandler: ((UUID, Date) -> Void)?
+
+    func bootstrapSnapshot() -> QuotaSnapshot? { nil }
+
+    func start(
+        onSnapshot: @escaping (UUID, QuotaSnapshot) -> Void,
+        onSignal: @escaping (UUID, Date) -> Void
+    ) {
+        snapshotHandler = onSnapshot
+        signalHandler = onSignal
+    }
+
+    func setActiveAccountID(_ accountID: UUID?) {}
+    func stop() {}
+
+    func emitSnapshot(accountID: UUID, snapshot: QuotaSnapshot) {
+        snapshotHandler?(accountID, snapshot)
+    }
+}
+
+actor RecordingUserNotifier: UserNotifying {
+    struct NotificationRecord: Equatable {
+        let identifier: String
+        let title: String
+        let body: String
+    }
+
+    private(set) var notifications: [NotificationRecord] = []
+
+    func notifyLowQuotaRecommendation(
+        identifier: String,
+        title: String,
+        body: String
+    ) async {
+        notifications.append(NotificationRecord(identifier: identifier, title: title, body: body))
+    }
+}
+
+private final class MockRuntimeInspector: @unchecked Sendable, CodexRuntimeInspecting {
+    let result: SwitchVerificationResult
+    let isRunning: Bool
+    private(set) var restartCallCount = 0
+
+    init(result: SwitchVerificationResult, isRunning: Bool = true) {
+        self.result = result
+        self.isRunning = isRunning
+    }
+
+    func isCodexDesktopRunning() -> Bool {
+        isRunning
+    }
+
+    func verifySwitch(after date: Date, timeoutSeconds: TimeInterval) async -> SwitchVerificationResult {
+        result
+    }
+
+    func restartCodex() async throws {
+        restartCallCount += 1
+    }
+}
+
+private enum MockError: LocalizedError {
+    case refreshFailed
+    case unused
+
+    var errorDescription: String? {
+        switch self {
+        case .refreshFailed:
+            return "refresh failed"
+        case .unused:
+            return "unused"
+        }
+    }
+}

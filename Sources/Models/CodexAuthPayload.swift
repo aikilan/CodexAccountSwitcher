@@ -1,0 +1,169 @@
+import Foundation
+
+enum CodexAuthMode: String, Codable, CaseIterable, Sendable {
+    case chatgpt
+    case apiKey = "api_key"
+
+    var displayName: String {
+        switch self {
+        case .chatgpt:
+            return "ChatGPT"
+        case .apiKey:
+            return "API Key"
+        }
+    }
+}
+
+struct CodexTokenBundle: Codable, Equatable, Sendable {
+    let idToken: String
+    let accessToken: String
+    let refreshToken: String
+    let accountID: String
+
+    enum CodingKeys: String, CodingKey {
+        case idToken = "id_token"
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
+        case accountID = "account_id"
+    }
+
+    static let empty = CodexTokenBundle(idToken: "", accessToken: "", refreshToken: "", accountID: "")
+
+    var isEmpty: Bool {
+        idToken.isEmpty && accessToken.isEmpty && refreshToken.isEmpty && accountID.isEmpty
+    }
+}
+
+struct CodexAuthPayload: Codable, Equatable, Sendable {
+    let authMode: CodexAuthMode
+    let openAIAPIKey: String?
+    let tokens: CodexTokenBundle
+    let lastRefresh: String
+
+    enum CodingKeys: String, CodingKey {
+        case authMode = "auth_mode"
+        case openAIAPIKey = "OPENAI_API_KEY"
+        case tokens
+        case lastRefresh = "last_refresh"
+    }
+
+    init(
+        authMode: CodexAuthMode = .chatgpt,
+        openAIAPIKey: String? = nil,
+        tokens: CodexTokenBundle = .empty,
+        lastRefresh: String = ""
+    ) {
+        self.authMode = authMode
+        self.openAIAPIKey = openAIAPIKey
+        self.tokens = tokens
+        self.lastRefresh = lastRefresh
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let openAIAPIKey = try container.decodeIfPresent(String.self, forKey: .openAIAPIKey)
+        let tokens = try container.decodeIfPresent(CodexTokenBundle.self, forKey: .tokens) ?? .empty
+        let lastRefresh = try container.decodeIfPresent(String.self, forKey: .lastRefresh) ?? ""
+        let authMode = try container.decodeIfPresent(CodexAuthMode.self, forKey: .authMode)
+            ?? ((openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false && tokens.isEmpty) ? .apiKey : .chatgpt)
+
+        self.init(authMode: authMode, openAIAPIKey: openAIAPIKey, tokens: tokens, lastRefresh: lastRefresh)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch authMode {
+        case .chatgpt:
+            try container.encode(authMode, forKey: .authMode)
+            try container.encode(tokens, forKey: .tokens)
+            try container.encode(lastRefresh, forKey: .lastRefresh)
+        case .apiKey:
+            try container.encodeIfPresent(openAIAPIKey, forKey: .openAIAPIKey)
+        }
+    }
+
+    func validated() throws -> CodexAuthPayload {
+        switch authMode {
+        case .chatgpt:
+            guard openAIAPIKey == nil else {
+                throw CodexAuthPayloadError.unexpectedAPIKeyForChatGPT
+            }
+            guard !tokens.idToken.isEmpty, !tokens.accessToken.isEmpty, !tokens.refreshToken.isEmpty, !tokens.accountID.isEmpty else {
+                throw CodexAuthPayloadError.missingTokenData
+            }
+            guard CodexDateCoding.parse(lastRefresh) != nil else {
+                throw CodexAuthPayloadError.invalidRefreshTimestamp
+            }
+        case .apiKey:
+            guard let trimmedAPIKey = openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedAPIKey.isEmpty else {
+                throw CodexAuthPayloadError.missingAPIKey
+            }
+            return CodexAuthPayload(authMode: .apiKey, openAIAPIKey: trimmedAPIKey)
+        }
+        return self
+    }
+
+    var accountIdentifier: String {
+        switch authMode {
+        case .chatgpt:
+            return tokens.accountID
+        case .apiKey:
+            return Self.apiKeyAccountIdentifier(for: openAIAPIKey ?? "")
+        }
+    }
+
+    var credentialSummary: String? {
+        guard authMode == .apiKey, let openAIAPIKey, !openAIAPIKey.isEmpty else { return nil }
+        let tail = String(openAIAPIKey.suffix(6))
+        return tail.isEmpty ? "API Key" : "sk-...\(tail)"
+    }
+
+    private static func apiKeyAccountIdentifier(for apiKey: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in apiKey.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(format: "api_%016llx", hash)
+    }
+}
+
+enum CodexAuthPayloadError: LocalizedError, Equatable {
+    case unsupportedAuthMode
+    case unexpectedAPIKeyForChatGPT
+    case missingAPIKey
+    case missingTokenData
+    case invalidRefreshTimestamp
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedAuthMode:
+            return "不支持当前 auth_mode。"
+        case .unexpectedAPIKeyForChatGPT:
+            return "ChatGPT 认证模式下不应包含 API Key。"
+        case .missingAPIKey:
+            return "auth.json 缺少 OPENAI_API_KEY。"
+        case .missingTokenData:
+            return "auth.json 缺少必要的 token 字段。"
+        case .invalidRefreshTimestamp:
+            return "auth.json 的 last_refresh 不是有效的 ISO8601 时间。"
+        }
+    }
+}
+
+enum CodexDateCoding {
+    private static func formatter() -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+
+    static func parse(_ value: String) -> Date? {
+        formatter().date(from: value)
+    }
+
+    static func string(from date: Date) -> String {
+        formatter().string(from: date)
+    }
+}
