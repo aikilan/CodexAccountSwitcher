@@ -353,6 +353,111 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.activeAccount?.codexAccountID, cachedPayload.accountIdentifier)
     }
 
+    func testSelectingClaudePlatformShowsPlaceholderState() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        )
+
+        await harness.model.prepare()
+        XCTAssertEqual(harness.model.accounts.count, 1)
+
+        harness.model.selectPlatform(.claude)
+
+        XCTAssertEqual(harness.model.accounts.count, 0)
+        XCTAssertNil(harness.model.selectedAccount)
+        XCTAssertFalse(harness.model.canAddAccountsOnSelectedPlatform)
+        XCTAssertEqual(harness.model.selectedPlatformHomeButtonTitle, L10n.tr("打开 ~/.claude"))
+        XCTAssertEqual(
+            harness.model.selectedPlatformUnsupportedMessage,
+            L10n.tr("Claude 平台框架已预留；本轮仅展示入口，账号接入、切换、CLI 启动和额度同步将在后续变更中实现。")
+        )
+    }
+
+    func testClaudeAddAccountPlaceholderDoesNotWriteAuth() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let authFileManager = RecordingAuthFileManager()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        )
+
+        await harness.model.prepare()
+        harness.model.addAccountPlatform = .claude
+        harness.model.apiKeyInput = "sk-test-claude"
+
+        await harness.model.startAPIKeyLogin()
+
+        XCTAssertTrue(authFileManager.activatedPayloads.isEmpty)
+        XCTAssertEqual(harness.model.accounts.count, 1)
+        XCTAssertEqual(
+            harness.model.addAccountStatus,
+            L10n.tr("Claude 入口已预留，但本轮不接入真实账号登录。")
+        )
+    }
+
+    func testClaudeAccountCannotLaunchCodexCLI() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let cliLauncher = RecordingCodexCLILauncher()
+        let claudeAccountID = UUID()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false),
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: claudeAccountID,
+                        platform: .claude,
+                        codexAccountID: "claude-placeholder",
+                        displayName: "Claude Placeholder",
+                        email: nil,
+                        authMode: .apiKey,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: false
+                    ),
+                    payload: try makeAPIKeyPayload("sk-claude-placeholder"),
+                    snapshot: nil
+                )
+            ],
+            cliLauncher: cliLauncher
+        )
+
+        await harness.model.prepare()
+        harness.model.selectPlatform(.claude)
+        let account = try XCTUnwrap(harness.model.database.account(id: claudeAccountID))
+
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: makeWorkingDirectoryURL("claude-cli"))
+
+        XCTAssertEqual(cliLauncher.launchCallCount, 0)
+        XCTAssertEqual(
+            harness.model.banner?.message,
+            L10n.tr("Claude 平台框架已预留；本轮仅展示入口，账号接入、切换、CLI 启动和额度同步将在后续变更中实现。")
+        )
+    }
+
     func testLowQuotaRecommendationNotifiesAndSupportsQuickSwitch() async throws {
         let activeAccountID = UUID()
         let candidateAccountID = UUID()
@@ -830,6 +935,7 @@ final class AppViewModelTests: XCTestCase {
         let isPrimaryAccountActive = activeAccountID == accountID
         let account = ManagedAccount(
             id: accountID,
+            platform: .codex,
             codexAccountID: cachedPayload.accountIdentifier,
             displayName: "Cached User",
             email: cachedPayload.authMode == .apiKey ? cachedPayload.credentialSummary : "cached@example.com",
@@ -848,6 +954,7 @@ final class AppViewModelTests: XCTestCase {
             AccountSeed(
                 account: ManagedAccount(
                     id: seed.account.id,
+                    platform: seed.account.platform,
                     codexAccountID: seed.account.codexAccountID,
                     displayName: seed.account.displayName,
                     email: seed.account.email,

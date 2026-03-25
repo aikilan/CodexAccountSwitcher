@@ -54,6 +54,26 @@ struct ContentView: View {
 
     private var accountSidebar: some View {
         VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.tr("平台"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker(
+                    L10n.tr("平台"),
+                    selection: Binding(
+                        get: { model.selectedPlatform },
+                        set: { model.selectPlatform($0) }
+                    )
+                ) {
+                    ForEach(model.availablePlatforms) { platform in
+                        Text(platform.displayName).tag(platform)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            .padding([.top, .horizontal])
+
             List(selection: $model.selectedAccountID) {
                 ForEach(model.accounts) { account in
                     AccountListRow(account: account, snapshot: model.snapshot(for: account.id))
@@ -80,11 +100,12 @@ struct ContentView: View {
                     Label(L10n.tr("新增账号"), systemImage: "plus.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!model.canAddAccountsOnSelectedPlatform)
 
                 Button {
-                    model.openCodexHomeInFinder()
+                    model.openSelectedPlatformHomeInFinder()
                 } label: {
-                    Label(L10n.tr("打开 ~/.codex"), systemImage: "folder")
+                    Label(model.selectedPlatformHomeButtonTitle, systemImage: "folder")
                 }
                 .buttonStyle(.bordered)
 
@@ -94,7 +115,11 @@ struct ContentView: View {
                     Label(model.isRefreshingAllStatuses ? L10n.tr("正在刷新账号状态...") : L10n.tr("刷新全部状态"), systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
-                .disabled(model.isRefreshingAllStatuses || model.accounts.isEmpty)
+                .disabled(
+                    model.isRefreshingAllStatuses
+                        || model.accounts.isEmpty
+                        || !model.selectedPlatformCapabilities.supportsStatusRefresh
+                )
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(L10n.tr("语言"))
@@ -116,7 +141,14 @@ struct ContentView: View {
                     .labelsHidden()
                 }
 
-                Text(model.paths.codexHome.path)
+                if model.isClaudePlaceholderSelected {
+                    Text(model.selectedPlatformUnsupportedMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text(model.selectedPlatformHomePath)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -156,12 +188,15 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detailPane: some View {
-        if let account = model.selectedAccount {
+        if model.isClaudePlaceholderSelected {
+            PlatformPlaceholderDetailView(model: model)
+        } else if let account = model.selectedAccount {
+            let authFilePath = model.paths.paths(for: account.platform).authFileURL?.path ?? model.selectedPlatformHomePath
             AccountDetailView(
                 model: model,
                 account: account,
                 snapshot: model.snapshot(for: account.id),
-                authFilePath: model.paths.authFileURL.path,
+                authFilePath: authFilePath,
                 onRename: { model.renameAccount(account.id, to: $0) },
                 onRefreshStatus: { Task { await model.refreshAccountStatus(account) } },
                 onSwitch: { Task { await model.switchToAccount(account) } },
@@ -173,6 +208,62 @@ struct ContentView: View {
                 systemImage: "person.2.slash",
                 description: Text(L10n.tr("先新增一个账号，或者导入当前 ~/.codex/auth.json 对应的账号。"))
             )
+        }
+    }
+}
+
+private struct PlatformPlaceholderDetailView: View {
+    @ObservedObject var model: AppViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L10n.tr("Claude 即将支持"))
+                        .font(.largeTitle.bold())
+                    Text(model.selectedPlatformUnsupportedMessage)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(L10n.tr("预留能力"))
+                        .font(.title2.bold())
+
+                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
+                        placeholderInfoRow(L10n.tr("平台"), "Claude")
+                        placeholderInfoRow(L10n.tr("配置目录"), model.selectedPlatformHomePath)
+                        placeholderInfoRow(L10n.tr("账号新增"), L10n.tr("未实现"))
+                        placeholderInfoRow(L10n.tr("账号切换"), L10n.tr("未实现"))
+                        placeholderInfoRow(L10n.tr("CLI 启动"), L10n.tr("未实现"))
+                        placeholderInfoRow(L10n.tr("额度同步"), L10n.tr("未实现"))
+                    }
+                }
+                .padding(24)
+                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                HStack(spacing: 12) {
+                    Button(L10n.tr("新增账号")) {}
+                        .buttonStyle(.borderedProminent)
+                        .disabled(true)
+
+                    Button(L10n.tr("刷新全部状态")) {}
+                        .buttonStyle(.bordered)
+                        .disabled(true)
+                }
+            }
+            .padding(24)
+        }
+    }
+
+    private func placeholderInfoRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
         }
     }
 }
@@ -838,6 +929,13 @@ struct MenuBarContentView: View {
 
             Divider()
 
+            if model.isClaudePlaceholderSelected {
+                Text(model.selectedPlatformUnsupportedMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             quickActionsSection
         }
         .padding(14)
@@ -951,13 +1049,16 @@ struct MenuBarContentView: View {
                     quickActionButton(L10n.tr("新增账号"), systemImage: "plus.circle") {
                         onOpenAddAccount()
                     }
+                    .disabled(!model.canAddAccountsOnSelectedPlatform)
                 }
 
                 HStack(spacing: 10) {
                     quickActionButton(
                         model.isRefreshingAllStatuses ? L10n.tr("刷新中") : L10n.tr("刷新状态"),
                         systemImage: "arrow.clockwise",
-                        isDisabled: model.isRefreshingAllStatuses || model.accounts.isEmpty
+                        isDisabled: model.isRefreshingAllStatuses
+                            || model.accounts.isEmpty
+                            || !model.selectedPlatformCapabilities.supportsStatusRefresh
                     ) {
                         Task { await model.refreshAllAccountStatuses() }
                     }

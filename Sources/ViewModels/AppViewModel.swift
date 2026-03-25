@@ -83,8 +83,10 @@ private enum AccountStatusRefreshOutcome {
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published private(set) var database: AppDatabase = .empty
+    @Published var selectedPlatform: PlatformKind = .codex
     @Published var selectedAccountID: UUID?
     @Published private(set) var languagePreference = L10n.currentLanguagePreference
+    @Published var addAccountPlatform: PlatformKind = .codex
     @Published var addAccountMode: AddAccountMode = .browser
     @Published var addAccountStatus = L10n.tr("选择浏览器登录或 API Key 接入方式。")
     @Published var addAccountError: String?
@@ -120,6 +122,7 @@ final class AppViewModel: ObservableObject {
     private let runtimeInspector: any CodexRuntimeInspecting
     private let instanceLauncher: any CodexInstanceLaunching
     private let cliLauncher: any CodexCLILaunching
+    private let runtimes: [PlatformKind: any PlatformRuntime]
     private let bannerAutoDismissDuration: Duration
     private var browserSession: BrowserOAuthSession?
     private var browserWaitTask: Task<Void, Never>?
@@ -142,6 +145,7 @@ final class AppViewModel: ObservableObject {
         runtimeInspector: any CodexRuntimeInspecting,
         instanceLauncher: any CodexInstanceLaunching = CodexInstanceLauncher(),
         cliLauncher: any CodexCLILaunching = CodexCLILauncher(),
+        platformRuntimes: [any PlatformRuntime] = [CodexPlatformRuntime(), ClaudePlatformRuntime()],
         bannerAutoDismissDuration: Duration = .seconds(10)
     ) {
         self.paths = paths
@@ -155,6 +159,7 @@ final class AppViewModel: ObservableObject {
         self.runtimeInspector = runtimeInspector
         self.instanceLauncher = instanceLauncher
         self.cliLauncher = cliLauncher
+        self.runtimes = Dictionary(uniqueKeysWithValues: platformRuntimes.map { ($0.platform, $0) })
         self.bannerAutoDismissDuration = bannerAutoDismissDuration
     }
 
@@ -185,7 +190,8 @@ final class AppViewModel: ObservableObject {
                 quotaMonitor: quotaMonitor,
                 userNotifier: userNotifier,
                 runtimeInspector: runtimeInspector,
-                cliLauncher: CodexCLILauncher()
+                cliLauncher: CodexCLILauncher(),
+                platformRuntimes: [CodexPlatformRuntime(), ClaudePlatformRuntime()]
             )
         } catch {
             fatalError("Failed to build AppViewModel: \(error.localizedDescription)")
@@ -193,19 +199,70 @@ final class AppViewModel: ObservableObject {
     }
 
     var accounts: [ManagedAccount] {
-        database.accounts
+        database.accounts.filter { $0.platform == selectedPlatform }
     }
 
     var activeAccount: ManagedAccount? {
-        database.account(id: database.activeAccountID)
+        guard let account = database.account(id: database.activeAccountID), account.platform == selectedPlatform else {
+            return nil
+        }
+        return account
     }
 
     var selectedAccount: ManagedAccount? {
-        database.account(id: selectedAccountID) ?? activeAccount
+        if let account = database.account(id: selectedAccountID), account.platform == selectedPlatform {
+            return account
+        }
+        return activeAccount
     }
 
     var pendingDeleteAccount: ManagedAccount? {
         database.account(id: pendingDeleteAccountID)
+    }
+
+    var availablePlatforms: [PlatformKind] {
+        PlatformKind.allCases
+    }
+
+    var selectedPlatformCapabilities: PlatformCapabilities {
+        runtimes[selectedPlatform]?.capabilities ?? .placeholder
+    }
+
+    var selectedPlatformDisplayName: String {
+        runtimes[selectedPlatform]?.displayName ?? selectedPlatform.displayName
+    }
+
+    var selectedPlatformHomePath: String {
+        paths.paths(for: selectedPlatform).homeURL.path
+    }
+
+    var selectedPlatformHomeButtonTitle: String {
+        switch selectedPlatform {
+        case .codex:
+            return L10n.tr("打开 ~/.codex")
+        case .claude:
+            return L10n.tr("打开 ~/.claude")
+        }
+    }
+
+    var selectedPlatformUnsupportedMessage: String {
+        unsupportedMessage(for: selectedPlatform)
+    }
+
+    var selectedPlatformAddAccountMessage: String {
+        addAccountMessage(for: addAccountPlatform)
+    }
+
+    var canAddAccountsOnSelectedPlatform: Bool {
+        selectedPlatformCapabilities.supportsAccountAddition
+    }
+
+    var canAddAccountsInSheet: Bool {
+        (runtimes[addAccountPlatform]?.capabilities ?? .placeholder).supportsAccountAddition
+    }
+
+    var isClaudePlaceholderSelected: Bool {
+        selectedPlatform == .claude
     }
 
     func isRefreshingStatus(for accountID: UUID) -> Bool {
@@ -233,7 +290,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func canLaunchIsolatedCodex(for account: ManagedAccount) -> Bool {
-        !(account.isActive && account.authMode == .chatgpt) && !hasLaunchedIsolatedInstance(for: account.id)
+        guard account.platform == .codex else { return false }
+        return !(account.isActive && account.authMode == .chatgpt) && !hasLaunchedIsolatedInstance(for: account.id)
     }
 
     var isSwitchInProgress: Bool {
@@ -261,13 +319,20 @@ final class AppViewModel: ObservableObject {
         return pendingRestartPromptMessage
     }
 
+    func selectPlatform(_ platform: PlatformKind) {
+        guard selectedPlatform != platform else { return }
+        selectedPlatform = platform
+        addAccountPlatform = platform
+        syncSelectionForSelectedPlatform()
+    }
+
     func updateLanguagePreference(_ preference: AppLanguagePreference) {
         guard languagePreference != preference else { return }
         L10n.setLanguagePreference(preference)
         languagePreference = preference
 
         if browserSession == nil, !isAuthenticating, addAccountError == nil {
-            addAccountStatus = L10n.tr("选择浏览器登录或 API Key 接入方式。")
+            addAccountStatus = selectedPlatformAddAccountMessage
         }
 
         (NSApp.delegate as? AppDelegate)?.refreshLocalization()
@@ -279,7 +344,7 @@ final class AppViewModel: ObservableObject {
 
         do {
             database = try await databaseStore.load()
-            selectedAccountID = database.activeAccountID ?? database.accounts.first?.id
+            syncSelectionForSelectedPlatform(preferredAccountID: database.activeAccountID)
         } catch {
             pushBanner(level: .error, message: L10n.tr("本地数据库读取失败：%@", error.localizedDescription))
         }
@@ -308,7 +373,9 @@ final class AppViewModel: ObservableObject {
             }
 
             setActiveAccount(account.id)
-            selectedAccountID = selectedAccountID ?? account.id
+            if selectedPlatform == .codex {
+                selectedAccountID = selectedAccountID ?? account.id
+            }
             database.appendLog(level: .info, message: L10n.tr("已导入当前 ~/.codex/auth.json 对应的账号。"))
             try await persistDatabase()
         } catch {
@@ -326,7 +393,7 @@ final class AppViewModel: ObservableObject {
                 guard let previousActiveID = database.activeAccountID else { return }
                 setActiveAccount(nil)
                 if selectedAccountID == previousActiveID {
-                    selectedAccountID = database.accounts.first?.id
+                    syncSelectionForSelectedPlatform()
                 }
                 database.appendLog(level: .info, message: L10n.tr("检测到当前 ~/.codex/auth.json 已清空，已同步当前账号状态。"))
                 try await persistDatabase()
@@ -335,7 +402,9 @@ final class AppViewModel: ObservableObject {
 
             let identity = try resolveIdentity(from: payload)
             let previousActiveID = database.activeAccountID
-            let existingAccountID = database.accounts.first(where: { $0.codexAccountID == identity.accountID })?.id
+            let existingAccountID = database.accounts.first(where: {
+                $0.platform == .codex && $0.codexAccountID == identity.accountID
+            })?.id
             let account = upsertAccount(identity: identity, payload: payload, makeActive: true)
             try credentialStore.save(payload, for: account.id)
 
@@ -345,7 +414,7 @@ final class AppViewModel: ObservableObject {
             }
 
             setActiveAccount(account.id)
-            if selectedAccountID == nil || previousActiveID != account.id {
+            if selectedPlatform == .codex, (selectedAccountID == nil || previousActiveID != account.id) {
                 selectedAccountID = account.id
             }
 
@@ -372,11 +441,15 @@ final class AppViewModel: ObservableObject {
         await reconcileCurrentAuthState()
     }
 
-    func openCodexHomeInFinder() {
-        NSWorkspace.shared.open(paths.codexHome)
+    func openSelectedPlatformHomeInFinder() {
+        NSWorkspace.shared.open(paths.paths(for: selectedPlatform).homeURL)
     }
 
     func openCodexCLI(for account: ManagedAccount, workingDirectoryURL: URL) async {
+        guard account.platform == .codex else {
+            pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
+            return
+        }
         guard launchingCLIAccountID == nil else { return }
         launchingCLIAccountID = account.id
         defer {
@@ -431,6 +504,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func launchIsolatedCodex(for account: ManagedAccount) async {
+        guard account.platform == .codex else {
+            pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
+            return
+        }
         if hasLaunchedIsolatedInstance(for: account.id) {
             pushBanner(level: .info, message: L10n.tr("账号 %@ 的独立实例已在当前会话中启动。", account.displayName))
             return
@@ -486,6 +563,11 @@ final class AppViewModel: ObservableObject {
     }
 
     func startBrowserLogin() async {
+        guard addAccountPlatform == .codex else {
+            addAccountError = nil
+            addAccountStatus = selectedPlatformAddAccountMessage
+            return
+        }
         addAccountError = nil
         addAccountStatus = L10n.tr("正在准备浏览器 OAuth。")
         browserCallbackInput = ""
@@ -544,6 +626,11 @@ final class AppViewModel: ObservableObject {
     }
 
     func startAPIKeyLogin() async {
+        guard addAccountPlatform == .codex else {
+            addAccountError = nil
+            addAccountStatus = selectedPlatformAddAccountMessage
+            return
+        }
         addAccountError = nil
         let apiKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let preferredDisplayName = apiKeyDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -574,6 +661,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func switchToAccount(_ account: ManagedAccount) async {
+        guard account.platform == .codex else {
+            pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
+            return
+        }
         guard !isSwitchInProgress else { return }
         switchingAccountID = account.id
         verifyingSwitchAccountID = nil
@@ -585,7 +676,9 @@ final class AppViewModel: ObservableObject {
             let payload = try await latestPayloadForSwitch(for: account)
             try authFileManager.activatePreservingFileIdentity(payload)
             setActiveAccount(account.id)
-            selectedAccountID = account.id
+            if account.platform == selectedPlatform {
+                selectedAccountID = account.id
+            }
             database.appendLog(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
             try await persistDatabase()
             switchingAccountID = nil
@@ -640,7 +733,7 @@ final class AppViewModel: ObservableObject {
                 setActiveAccount(nil)
             }
             database.removeAccount(id: accountID)
-            selectedAccountID = database.accounts.first?.id
+            syncSelectionForSelectedPlatform()
             database.appendLog(
                 level: .info,
                 message: clearCurrentAuth ? L10n.tr("已删除账号并清空当前 ~/.codex/auth.json。") : L10n.tr("已删除账号 %@。", account.displayName)
@@ -660,7 +753,7 @@ final class AppViewModel: ObservableObject {
         guard !isRefreshingAllStatuses else { return }
         isRefreshingAllStatuses = true
 
-        let accountIDs = database.accounts.map(\.id)
+        let accountIDs = accounts.map(\.id)
         var successCount = 0
         var partialCount = 0
         var failureCount = 0
@@ -701,7 +794,8 @@ final class AppViewModel: ObservableObject {
         apiKeyInput = ""
         apiKeyDisplayName = ""
         addAccountError = nil
-        addAccountStatus = L10n.tr("选择浏览器登录或 API Key 接入方式。")
+        addAccountPlatform = selectedPlatform
+        addAccountStatus = selectedPlatformAddAccountMessage
         isAuthenticating = false
     }
 
@@ -710,7 +804,9 @@ final class AppViewModel: ObservableObject {
         try credentialStore.save(result.payload, for: account.id)
         try authFileManager.activatePreservingFileIdentity(result.payload)
         setActiveAccount(account.id)
-        selectedAccountID = account.id
+        if account.platform == selectedPlatform {
+            selectedAccountID = account.id
+        }
         database.appendLog(level: .info, message: L10n.tr("已登录并激活账号 %@。", account.displayName))
         try await persistDatabase()
         await verifySwitch(at: Date(), for: account.id)
@@ -735,11 +831,12 @@ final class AppViewModel: ObservableObject {
     }
 
     private func upsertAccount(identity: AuthIdentity, payload: CodexAuthPayload, makeActive: Bool) -> ManagedAccount {
-        let existing = database.accounts.first(where: { $0.codexAccountID == identity.accountID })
+        let existing = database.accounts.first(where: { $0.platform == .codex && $0.codexAccountID == identity.accountID })
         let refreshDate = CodexDateCoding.parse(payload.lastRefresh)
 
         let account = ManagedAccount(
             id: existing?.id ?? UUID(),
+            platform: .codex,
             codexAccountID: identity.accountID,
             displayName: existing?.displayName ?? identity.displayName,
             email: identity.email ?? existing?.email,
@@ -762,6 +859,13 @@ final class AppViewModel: ObservableObject {
     @discardableResult
     private func refreshAccountStatus(accountID: UUID, showBanner: Bool) async -> AccountStatusRefreshOutcome {
         guard !refreshingAccountIDs.contains(accountID), let currentAccount = database.account(id: accountID) else {
+            return .failure
+        }
+        guard currentAccount.platform == .codex else {
+            let message = unsupportedMessage(for: currentAccount.platform)
+            if showBanner {
+                banner = BannerState(level: .warning, message: message)
+            }
             return .failure
         }
 
@@ -1150,7 +1254,7 @@ final class AppViewModel: ObservableObject {
 
     private func bestLowQuotaSwitchCandidate(excluding activeAccountID: UUID) -> (account: ManagedAccount, snapshot: QuotaSnapshot)? {
         database.accounts
-            .filter { $0.id != activeAccountID }
+            .filter { $0.platform == .codex && $0.id != activeAccountID }
             .compactMap { account -> (ManagedAccount, QuotaSnapshot)? in
                 guard let snapshot = database.snapshot(for: account.id) else { return nil }
                 return (account, snapshot)
@@ -1170,5 +1274,50 @@ final class AppViewModel: ObservableObject {
 
     private func persistDatabase() async throws {
         try await databaseStore.save(database)
+    }
+
+    private func unsupportedMessage(for platform: PlatformKind) -> String {
+        switch platform {
+        case .codex:
+            return ""
+        case .claude:
+            return L10n.tr("Claude 平台框架已预留；本轮仅展示入口，账号接入、切换、CLI 启动和额度同步将在后续变更中实现。")
+        }
+    }
+
+    private func addAccountMessage(for platform: PlatformKind) -> String {
+        switch platform {
+        case .codex:
+            return L10n.tr("选择浏览器登录或 API Key 接入方式。")
+        case .claude:
+            return L10n.tr("Claude 入口已预留，但本轮不接入真实账号登录。")
+        }
+    }
+
+    private func syncSelectionForSelectedPlatform(preferredAccountID: UUID? = nil) {
+        if let preferredAccountID,
+           let account = database.account(id: preferredAccountID),
+           account.platform == selectedPlatform
+        {
+            selectedAccountID = preferredAccountID
+            return
+        }
+
+        if let selectedAccountID,
+           let account = database.account(id: selectedAccountID),
+           account.platform == selectedPlatform
+        {
+            return
+        }
+
+        if let activeAccountID = database.activeAccountID,
+           let account = database.account(id: activeAccountID),
+           account.platform == selectedPlatform
+        {
+            selectedAccountID = activeAccountID
+            return
+        }
+
+        selectedAccountID = accounts.first?.id
     }
 }

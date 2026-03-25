@@ -9,7 +9,7 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
-        .executable(name: "CodexAccountSwitcher", targets: ["CodexAccountSwitcher"]),
+        .executable(name: "LLMAccountSwitcher", targets: ["CodexAccountSwitcher"]),
     ],
     targets: [
         .executableTarget(

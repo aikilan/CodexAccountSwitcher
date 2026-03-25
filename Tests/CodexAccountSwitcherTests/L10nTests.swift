@@ -18,7 +18,7 @@ final class L10nTests: XCTestCase {
     func testResourceBundleResolvesFromPackagedAppResourcesDirectory() throws {
         let fileManager = FileManager.default
         let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let appBundleURL = rootURL.appendingPathComponent("CodexAccountSwitcher.app", isDirectory: true)
+        let appBundleURL = rootURL.appendingPathComponent("LLMAccountSwitcher.app", isDirectory: true)
         let contentsURL = appBundleURL.appendingPathComponent("Contents", isDirectory: true)
         let resourcesURL = contentsURL.appendingPathComponent("Resources", isDirectory: true)
         let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
@@ -34,9 +34,9 @@ final class L10nTests: XCTestCase {
         try fileManager.createDirectory(at: resourceBundleURL, withIntermediateDirectories: true)
 
         let appInfo: NSDictionary = [
-            "CFBundleExecutable": "CodexAccountSwitcher",
-            "CFBundleIdentifier": "com.openai.CodexAccountSwitcher.tests",
-            "CFBundleName": "CodexAccountSwitcher",
+            "CFBundleExecutable": "LLMAccountSwitcher",
+            "CFBundleIdentifier": "com.openai.LLMAccountSwitcher.tests",
+            "CFBundleName": "LLM Account Switcher",
             "CFBundlePackageType": "APPL",
         ]
         XCTAssertTrue(appInfo.write(to: contentsURL.appendingPathComponent("Info.plist"), atomically: true))
@@ -48,7 +48,7 @@ final class L10nTests: XCTestCase {
         ]
         XCTAssertTrue(resourceInfo.write(to: resourceBundleURL.appendingPathComponent("Info.plist"), atomically: true))
 
-        fileManager.createFile(atPath: macOSURL.appendingPathComponent("CodexAccountSwitcher").path, contents: Data())
+        fileManager.createFile(atPath: macOSURL.appendingPathComponent("LLMAccountSwitcher").path, contents: Data())
 
         let appBundle = try XCTUnwrap(Bundle(url: appBundleURL))
         XCTAssertEqual(L10n.resourceBundle(mainBundle: appBundle)?.bundleURL, resourceBundleURL)

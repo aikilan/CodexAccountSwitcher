@@ -1,12 +1,13 @@
-# Codex Account Switcher
+# LLM Account Switcher
 
 [简体中文说明](README.zh-CN.md)
 
-Codex Account Switcher is a native macOS menu bar app for managing multiple Codex identities on one machine. It supports both ChatGPT browser sign-in and API key accounts, keeps local account metadata in one place, and switches the active identity by atomically updating `~/.codex/auth.json`.
+LLM Account Switcher is a native macOS menu bar app for managing local LLM account workspaces on one machine. This release keeps full Codex support, exposes a Claude placeholder entry, keeps local account metadata in one place, and switches the active Codex identity by atomically updating `~/.codex/auth.json`.
 
 ## Features
 
-- Manage multiple Codex accounts from a menu bar utility and a dedicated desktop window.
+- Manage local LLM account workspaces from a menu bar utility and a dedicated desktop window.
+- Switch between Codex and Claude platform views. Claude is visible as a placeholder in this release.
 - Add ChatGPT accounts through browser OAuth.
 - Add API key accounts for local credential switching.
 - Switch the active account without manually editing `~/.codex/auth.json`.
@@ -18,7 +19,7 @@ Codex Account Switcher is a native macOS menu bar app for managing multiple Code
 - Refresh online usage data for supported ChatGPT accounts through `/wham/usage`.
 - Recommend switching when the active account is running low on the 5-hour budget.
 - Detect stale live Codex sessions after a switch and suggest restarting Codex when needed.
-- Store app metadata in `~/Library/Application Support/CodexAccountSwitcher/accounts.json` and cached credentials in `~/Library/Application Support/CodexAccountSwitcher/credentials-cache.json` without Keychain prompts.
+- Store app metadata in `~/Library/Application Support/LLMAccountSwitcher/accounts.json` and cached credentials in `~/Library/Application Support/LLMAccountSwitcher/credentials-cache.json` without Keychain prompts.
 
 ## Requirements
 
@@ -50,8 +51,8 @@ swift test
 
 The packaging script writes these artifacts to `dist/`:
 
-- `CodexAccountSwitcher.app`
-- `CodexAccountSwitcher.zip`
+- `LLMAccountSwitcher.app`
+- `LLMAccountSwitcher.zip`
 - `assets/AppIcon.icns`
 - `assets/AppIcon-master.png`
 - `assets/MenuBarIcon-template.png`
@@ -61,4 +62,5 @@ The packaging script writes these artifacts to `dist/`:
 - Quota values are shown as remaining percentage so they align with the Codex status panel.
 - Manual status refresh pulls online usage data first, and later local session events can still replace the snapshot with fresher data.
 - API key accounts support local switching, but not online usage refresh.
+- Claude is exposed as a platform entry only in this release. Real Claude authentication, switching, CLI launch, and quota sync are not implemented yet.
 - The app no longer depends on Keychain, so switching accounts and opening the main window should not trigger credential permission prompts.

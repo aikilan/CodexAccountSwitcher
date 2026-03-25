@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct CodexAccountSwitcherApp: App {
+struct LLMAccountSwitcherApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppViewModel
 
@@ -12,7 +12,7 @@ struct CodexAccountSwitcherApp: App {
     }
 
     var body: some Scene {
-        Window(L10n.tr("Codex Account Switcher"), id: "accounts") {
+        Window(L10n.tr("LLM Account Switcher"), id: "accounts") {
             ContentView(model: model)
                 .frame(minWidth: 960, minHeight: 620)
         }

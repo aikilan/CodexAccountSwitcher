@@ -53,6 +53,7 @@ extension SubscriptionDetails {
 
 struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
+    var platform: PlatformKind
     var codexAccountID: String
     var displayName: String
     var email: String?
@@ -67,6 +68,83 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
     var lastStatusMessage: String?
     var lastStatusLevel: SwitchLogLevel?
     var isActive: Bool
+
+    init(
+        id: UUID,
+        platform: PlatformKind = .codex,
+        codexAccountID: String,
+        displayName: String,
+        email: String?,
+        authMode: CodexAuthMode,
+        createdAt: Date,
+        lastUsedAt: Date?,
+        lastQuotaSnapshotAt: Date?,
+        lastRefreshAt: Date?,
+        planType: String?,
+        subscriptionDetails: SubscriptionDetails? = nil,
+        lastStatusCheckAt: Date?,
+        lastStatusMessage: String?,
+        lastStatusLevel: SwitchLogLevel?,
+        isActive: Bool
+    ) {
+        self.id = id
+        self.platform = platform
+        self.codexAccountID = codexAccountID
+        self.displayName = displayName
+        self.email = email
+        self.authMode = authMode
+        self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+        self.lastQuotaSnapshotAt = lastQuotaSnapshotAt
+        self.lastRefreshAt = lastRefreshAt
+        self.planType = planType
+        self.subscriptionDetails = subscriptionDetails
+        self.lastStatusCheckAt = lastStatusCheckAt
+        self.lastStatusMessage = lastStatusMessage
+        self.lastStatusLevel = lastStatusLevel
+        self.isActive = isActive
+    }
+}
+
+extension ManagedAccount {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case platform
+        case codexAccountID
+        case displayName
+        case email
+        case authMode
+        case createdAt
+        case lastUsedAt
+        case lastQuotaSnapshotAt
+        case lastRefreshAt
+        case planType
+        case subscriptionDetails
+        case lastStatusCheckAt
+        case lastStatusMessage
+        case lastStatusLevel
+        case isActive
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.platform = try container.decodeIfPresent(PlatformKind.self, forKey: .platform) ?? .codex
+        self.codexAccountID = try container.decode(String.self, forKey: .codexAccountID)
+        self.displayName = try container.decode(String.self, forKey: .displayName)
+        self.email = try container.decodeIfPresent(String.self, forKey: .email)
+        self.authMode = try container.decode(CodexAuthMode.self, forKey: .authMode)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+        self.lastQuotaSnapshotAt = try container.decodeIfPresent(Date.self, forKey: .lastQuotaSnapshotAt)
+        self.lastRefreshAt = try container.decodeIfPresent(Date.self, forKey: .lastRefreshAt)
+        self.planType = try container.decodeIfPresent(String.self, forKey: .planType)
+        self.subscriptionDetails = try container.decodeIfPresent(SubscriptionDetails.self, forKey: .subscriptionDetails)
+        self.lastStatusCheckAt = try container.decodeIfPresent(Date.self, forKey: .lastStatusCheckAt)
+        self.lastStatusMessage = try container.decodeIfPresent(String.self, forKey: .lastStatusMessage)
+        self.lastStatusLevel = try container.decodeIfPresent(SwitchLogLevel.self, forKey: .lastStatusLevel)
+        self.isActive = try container.decode(Bool.self, forKey: .isActive)
+    }
 }
 
 enum SwitchLogLevel: String, Codable, Hashable, Sendable {
@@ -90,7 +168,7 @@ struct AppDatabase: Codable, Sendable {
     var cliWorkingDirectoriesByAccountID: [String: [String]] = [:]
     var activeAccountID: UUID?
 
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     static let empty = AppDatabase(
         version: currentVersion,
@@ -125,7 +203,9 @@ struct AppDatabase: Codable, Sendable {
     }
 
     mutating func upsert(account: ManagedAccount) {
-        if let index = accounts.firstIndex(where: { $0.id == account.id || $0.codexAccountID == account.codexAccountID }) {
+        if let index = accounts.firstIndex(where: {
+            $0.id == account.id || ($0.platform == account.platform && $0.codexAccountID == account.codexAccountID)
+        }) {
             accounts[index] = account
         } else {
             accounts.append(account)
@@ -191,7 +271,7 @@ extension AppDatabase {
         let activeAccountID = try container.decodeIfPresent(UUID.self, forKey: .activeAccountID)
 
         self.init(
-            version: version,
+            version: max(version, Self.currentVersion),
             accounts: accounts,
             quotaSnapshots: quotaSnapshots,
             switchLogs: switchLogs,

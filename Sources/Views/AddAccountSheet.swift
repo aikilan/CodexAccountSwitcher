@@ -16,17 +16,37 @@ struct AddAccountSheet: View {
                 }
             }
 
-            Picker(L10n.tr("登录方式"), selection: $model.addAccountMode) {
-                ForEach(AddAccountMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
+            Picker(L10n.tr("平台"), selection: $model.addAccountPlatform) {
+                ForEach(model.availablePlatforms) { platform in
+                    Text(platform.displayName).tag(platform)
                 }
             }
             .pickerStyle(.segmented)
+            .onChange(of: model.addAccountPlatform) { _, platform in
+                if platform == .codex, !AddAccountMode.allCases.contains(model.addAccountMode) {
+                    model.addAccountMode = .browser
+                }
+                model.addAccountError = nil
+                model.addAccountStatus = model.selectedPlatformAddAccountMessage
+            }
+            .onAppear {
+                model.addAccountPlatform = model.selectedPlatform
+                model.addAccountStatus = model.selectedPlatformAddAccountMessage
+            }
 
             Text(model.addAccountStatus)
                 .foregroundStyle(.secondary)
 
-            if model.addAccountMode == .browser, let authorizeURL = model.browserAuthorizeURL {
+            if model.addAccountPlatform == .codex {
+                Picker(L10n.tr("登录方式"), selection: $model.addAccountMode) {
+                    ForEach(AddAccountMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if model.addAccountPlatform == .codex, model.addAccountMode == .browser, let authorizeURL = model.browserAuthorizeURL {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L10n.tr("浏览器 OAuth"))
                         .font(.headline)
@@ -56,7 +76,7 @@ struct AddAccountSheet: View {
                 .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            if model.addAccountMode == .apiKey {
+            if model.addAccountPlatform == .codex, model.addAccountMode == .apiKey {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L10n.tr("API Key 接入"))
                         .font(.headline)
@@ -79,6 +99,19 @@ struct AddAccountSheet: View {
                 .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
+            if model.addAccountPlatform == .claude {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L10n.tr("Claude 即将支持"))
+                        .font(.headline)
+                    Text(L10n.tr("Claude 平台框架已预留；本轮仅展示入口，不接入真实账号登录、切换或 CLI 启动。"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+
             if let error = model.addAccountError {
                 Text(error)
                     .foregroundStyle(.red)
@@ -92,18 +125,27 @@ struct AddAccountSheet: View {
                     dismiss()
                 }
                 Spacer()
-                Button(model.addAccountMode == .browser ? L10n.tr("开始浏览器登录") : L10n.tr("保存并激活 API Key")) {
+                Button(
+                    model.addAccountPlatform == .claude
+                        ? L10n.tr("Claude 即将支持")
+                        : (model.addAccountMode == .browser ? L10n.tr("开始浏览器登录") : L10n.tr("保存并激活 API Key"))
+                ) {
                     Task {
-                        switch model.addAccountMode {
-                        case .browser:
-                            await model.startBrowserLogin()
-                        case .apiKey:
-                            await model.startAPIKeyLogin()
+                        switch model.addAccountPlatform {
+                        case .codex:
+                            switch model.addAccountMode {
+                            case .browser:
+                                await model.startBrowserLogin()
+                            case .apiKey:
+                                await model.startAPIKeyLogin()
+                            }
+                        case .claude:
+                            break
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.isAuthenticating)
+                .disabled(model.isAuthenticating || !model.canAddAccountsInSheet)
             }
         }
         .padding(24)

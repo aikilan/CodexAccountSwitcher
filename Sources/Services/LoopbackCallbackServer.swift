@@ -122,7 +122,7 @@ final class LoopbackCallbackServer: @unchecked Sendable {
                 self.sendResponse(
                     connection: connection,
                     statusCode: 200,
-                    body: "<html><body><h2>Login completed.</h2><p>You can close this tab and return to Codex Account Switcher.</p></body></html>"
+                    body: "<html><body><h2>Login completed.</h2><p>You can close this tab and return to LLM Account Switcher.</p></body></html>"
                 )
                 self.finish(with: .success(callback))
             case let .failure(error):
