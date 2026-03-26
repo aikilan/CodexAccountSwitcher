@@ -1,16 +1,35 @@
 import AppKit
 import SwiftUI
 
+private enum SidebarLayoutMetrics {
+    static let minWidth: CGFloat = 260
+    static let idealWidth: CGFloat = 300
+    static let maxWidth: CGFloat = 360
+    static let horizontalPadding: CGFloat = 16
+    static let sectionVerticalPadding: CGFloat = 16
+    static let footerPadding: CGFloat = 16
+}
+
+@MainActor
 struct ContentView: View {
     @ObservedObject var model: AppViewModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        NavigationSplitView {
+        HSplitView {
             accountSidebar
-        } detail: {
+                .frame(
+                    minWidth: SidebarLayoutMetrics.minWidth,
+                    idealWidth: SidebarLayoutMetrics.idealWidth,
+                    maxWidth: SidebarLayoutMetrics.maxWidth,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
+
             detailContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             WindowRouter.shared.register { id in
                 openWindow(id: id)
@@ -54,109 +73,169 @@ struct ContentView: View {
 
     private var accountSidebar: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(L10n.tr("平台"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            sidebarHeader
+            Divider()
+            sidebarBody
+            Divider()
+            sidebarFooter
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
 
-                Picker(
-                    L10n.tr("平台"),
-                    selection: Binding(
-                        get: { model.selectedPlatform },
-                        set: { model.selectPlatform($0) }
-                    )
-                ) {
-                    ForEach(model.availablePlatforms) { platform in
-                        Text(platform.displayName).tag(platform)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-            .padding([.top, .horizontal])
+    private var sidebarHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.tr("账号"))
+                .font(.title2.bold())
 
-            List(selection: $model.selectedAccountID) {
-                ForEach(model.accounts) { account in
-                    AccountListRow(account: account, snapshot: model.snapshot(for: account.id))
-                        .tag(account.id)
-                        .contentShape(Rectangle())
-                        .contextMenu {
-                            Button(account.isActive ? L10n.tr("当前正在使用") : L10n.tr("切换到此账号")) {
-                                Task { await model.switchToAccount(account) }
-                            }
-                            .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+            Text(L10n.tr("平台"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-                            Button(model.isRefreshingStatus(for: account.id) ? L10n.tr("正在更新状态...") : L10n.tr("手动更新状态")) {
-                                Task { await model.refreshAccountStatus(account) }
-                            }
-                            .disabled(model.isRefreshingStatus(for: account.id) || model.isRefreshingAllStatuses || model.isSwitchInProgress)
-                        }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Button {
-                    presentWindow(id: "add-account")
-                } label: {
-                    Label(L10n.tr("新增账号"), systemImage: "plus.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canAddAccountsOnSelectedPlatform)
-
-                Button {
-                    model.openSelectedPlatformHomeInFinder()
-                } label: {
-                    Label(model.selectedPlatformHomeButtonTitle, systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    Task { await model.refreshAllAccountStatuses() }
-                } label: {
-                    Label(model.isRefreshingAllStatuses ? L10n.tr("正在刷新账号状态...") : L10n.tr("刷新全部状态"), systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .disabled(
-                    model.isRefreshingAllStatuses
-                        || model.accounts.isEmpty
-                        || !model.selectedPlatformCapabilities.supportsStatusRefresh
+            Picker(
+                L10n.tr("平台"),
+                selection: Binding(
+                    get: { model.selectedPlatform },
+                    set: { model.selectPlatform($0) }
                 )
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(L10n.tr("语言"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Picker(
-                        L10n.tr("语言"),
-                        selection: Binding(
-                            get: { model.languagePreference },
-                            set: { model.updateLanguagePreference($0) }
-                        )
-                    ) {
-                        ForEach(AppLanguagePreference.allCases) { preference in
-                            Text(preference.title).tag(preference)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+            ) {
+                ForEach(model.availablePlatforms) { platform in
+                    Text(platform.displayName).tag(platform)
                 }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(.horizontal, SidebarLayoutMetrics.horizontalPadding)
+        .padding(.vertical, SidebarLayoutMetrics.sectionVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var sidebarBody: some View {
+        Group {
+            if model.accounts.isEmpty {
+                sidebarEmptyState
+            } else {
+                sidebarAccountList
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var sidebarAccountList: some View {
+        List(selection: $model.selectedAccountID) {
+            ForEach(model.accounts) { account in
+                AccountListRow(account: account, snapshot: model.snapshot(for: account.id))
+                    .tag(account.id)
+                    .contentShape(Rectangle())
+                    .contextMenu {
+                        Button(account.isActive ? L10n.tr("当前正在使用") : L10n.tr("切换到此账号")) {
+                            Task { await model.switchToAccount(account) }
+                        }
+                        .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+
+                        Button(model.isRefreshingStatus(for: account.id) ? L10n.tr("正在更新状态...") : L10n.tr("手动更新状态")) {
+                            Task { await model.refreshAccountStatus(account) }
+                        }
+                        .disabled(model.isRefreshingStatus(for: account.id) || model.isRefreshingAllStatuses || model.isSwitchInProgress)
+                    }
+            }
+        }
+        .id("accounts-\(model.selectedPlatform.rawValue)")
+        .listStyle(.sidebar)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var sidebarEmptyState: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(
+                    model.isClaudePlaceholderSelected
+                        ? L10n.tr("Claude 即将支持")
+                        : L10n.tr("还没有账号")
+                )
+                .font(.headline)
+                .foregroundStyle(.secondary)
 
                 if model.isClaudePlaceholderSelected {
-                    Text(model.selectedPlatformUnsupportedMessage)
+                    Text(L10n.tr("Claude 平台框架已预留；本轮仅展示入口，不接入真实账号登录、切换或 CLI 启动。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-
-                Text(model.selectedPlatformHomePath)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
             }
-            .padding()
+            .padding(.horizontal, SidebarLayoutMetrics.horizontalPadding)
+            .padding(.vertical, 20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle(L10n.tr("账号"))
+        .id("empty-\(model.selectedPlatform.rawValue)")
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var sidebarFooter: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                presentWindow(id: "add-account")
+            } label: {
+                Label(L10n.tr("新增账号"), systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!model.canAddAccountsOnSelectedPlatform)
+
+            Button {
+                model.openSelectedPlatformHomeInFinder()
+            } label: {
+                Label(model.selectedPlatformHomeButtonTitle, systemImage: "folder")
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                Task { await model.refreshAllAccountStatuses() }
+            } label: {
+                Label(model.isRefreshingAllStatuses ? L10n.tr("正在刷新账号状态...") : L10n.tr("刷新全部状态"), systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .disabled(
+                model.isRefreshingAllStatuses
+                    || model.accounts.isEmpty
+                    || !model.selectedPlatformCapabilities.supportsStatusRefresh
+            )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L10n.tr("语言"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker(
+                    L10n.tr("语言"),
+                    selection: Binding(
+                        get: { model.languagePreference },
+                        set: { model.updateLanguagePreference($0) }
+                    )
+                ) {
+                    ForEach(AppLanguagePreference.allCases) { preference in
+                        Text(preference.title).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+            if model.isClaudePlaceholderSelected {
+                Text(model.selectedPlatformUnsupportedMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text(model.selectedPlatformHomePath)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .padding(SidebarLayoutMetrics.footerPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func presentWindow(id: String) {
@@ -190,6 +269,7 @@ struct ContentView: View {
     private var detailPane: some View {
         if model.isClaudePlaceholderSelected {
             PlatformPlaceholderDetailView(model: model)
+                .id("platform-\(model.selectedPlatform.rawValue)")
         } else if let account = model.selectedAccount {
             let authFilePath = model.paths.paths(for: account.platform).authFileURL?.path ?? model.selectedPlatformHomePath
             AccountDetailView(
@@ -202,6 +282,7 @@ struct ContentView: View {
                 onSwitch: { Task { await model.switchToAccount(account) } },
                 onDelete: { model.requestDeleteAccount(account.id) }
             )
+            .id(account.id)
         } else {
             ContentUnavailableView(
                 L10n.tr("还没有账号"),
