@@ -55,8 +55,10 @@ struct ContentView: View {
                 Button(L10n.tr("仅删除本地管理记录"), role: .destructive) {
                     Task { await model.deleteAccount(account.id, clearCurrentAuth: false) }
                 }
-                Button(L10n.tr("删除并同时清空当前 ~/.codex/auth.json"), role: .destructive) {
-                    Task { await model.deleteAccount(account.id, clearCurrentAuth: true) }
+                if account.platform == .codex {
+                    Button(L10n.tr("删除并同时清空当前 ~/.codex/auth.json"), role: .destructive) {
+                        Task { await model.deleteAccount(account.id, clearCurrentAuth: true) }
+                    }
                 }
             }
             Button(L10n.tr("取消"), role: .cancel) {
@@ -64,7 +66,11 @@ struct ContentView: View {
             }
         } message: {
             if let account = model.pendingDeleteAccount {
-                Text(L10n.tr("将删除账号“%@”。如果这是当前激活账号，第二个选项会让本机当前 Codex 处于登出状态。", account.displayName))
+                if account.platform == .codex {
+                    Text(L10n.tr("将删除账号“%@”。如果这是当前激活账号，第二个选项会让本机当前 Codex 处于登出状态。", account.displayName))
+                } else {
+                    Text(L10n.tr("将删除账号“%@”的本地管理记录。", account.displayName))
+                }
             } else {
                 Text(L10n.tr("如果这是当前激活账号，第二个选项会让本机当前 Codex 处于登出状态。"))
             }
@@ -125,7 +131,11 @@ struct ContentView: View {
     private var sidebarAccountList: some View {
         List(selection: $model.selectedAccountID) {
             ForEach(model.accounts) { account in
-                AccountListRow(account: account, snapshot: model.snapshot(for: account.id))
+                AccountListRow(
+                    account: account,
+                    snapshot: model.snapshot(for: account.id),
+                    claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id)
+                )
                     .tag(account.id)
                     .contentShape(Rectangle())
                     .contextMenu {
@@ -149,16 +159,12 @@ struct ContentView: View {
     private var sidebarEmptyState: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text(
-                    model.isClaudePlaceholderSelected
-                        ? L10n.tr("Claude 即将支持")
-                        : L10n.tr("还没有账号")
-                )
+                Text(model.selectedPlatform == .claude ? L10n.tr("还没有 Claude 账号") : L10n.tr("还没有账号"))
                 .font(.headline)
                 .foregroundStyle(.secondary)
 
-                if model.isClaudePlaceholderSelected {
-                    Text(L10n.tr("Claude 平台框架已预留；本轮仅展示入口，不接入真实账号登录、切换或 CLI 启动。"))
+                if model.selectedPlatform == .claude {
+                    Text(L10n.tr("可以导入当前 `~/.claude` 与 `~/.claude.json`，或添加 Anthropic API Key。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -221,7 +227,7 @@ struct ContentView: View {
                 .labelsHidden()
             }
 
-            if model.isClaudePlaceholderSelected {
+            if !model.selectedPlatformUnsupportedMessage.isEmpty {
                 Text(model.selectedPlatformUnsupportedMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -267,15 +273,13 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detailPane: some View {
-        if model.isClaudePlaceholderSelected {
-            PlatformPlaceholderDetailView(model: model)
-                .id("platform-\(model.selectedPlatform.rawValue)")
-        } else if let account = model.selectedAccount {
-            let authFilePath = model.paths.paths(for: account.platform).authFileURL?.path ?? model.selectedPlatformHomePath
+        if let account = model.selectedAccount {
+            let authFilePath = configurationPathText(for: account)
             AccountDetailView(
                 model: model,
                 account: account,
                 snapshot: model.snapshot(for: account.id),
+                claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
                 authFilePath: authFilePath,
                 onRename: { model.renameAccount(account.id, to: $0) },
                 onRefreshStatus: { Task { await model.refreshAccountStatus(account) } },
@@ -285,66 +289,28 @@ struct ContentView: View {
             .id(account.id)
         } else {
             ContentUnavailableView(
-                L10n.tr("还没有账号"),
+                model.selectedPlatform == .claude ? L10n.tr("还没有 Claude 账号") : L10n.tr("还没有账号"),
                 systemImage: "person.2.slash",
-                description: Text(L10n.tr("先新增一个账号，或者导入当前 ~/.codex/auth.json 对应的账号。"))
+                description: Text(
+                    model.selectedPlatform == .claude
+                        ? L10n.tr("先新增一个 Claude 账号，支持导入本地 Profile 或保存 Anthropic API Key。")
+                        : L10n.tr("先新增一个账号，或者导入当前 ~/.codex/auth.json 对应的账号。")
+                )
             )
         }
     }
-}
 
-private struct PlatformPlaceholderDetailView: View {
-    @ObservedObject var model: AppViewModel
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(L10n.tr("Claude 即将支持"))
-                        .font(.largeTitle.bold())
-                    Text(model.selectedPlatformUnsupportedMessage)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(L10n.tr("预留能力"))
-                        .font(.title2.bold())
-
-                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
-                        placeholderInfoRow(L10n.tr("平台"), "Claude")
-                        placeholderInfoRow(L10n.tr("配置目录"), model.selectedPlatformHomePath)
-                        placeholderInfoRow(L10n.tr("账号新增"), L10n.tr("未实现"))
-                        placeholderInfoRow(L10n.tr("账号切换"), L10n.tr("未实现"))
-                        placeholderInfoRow(L10n.tr("CLI 启动"), L10n.tr("未实现"))
-                        placeholderInfoRow(L10n.tr("额度同步"), L10n.tr("未实现"))
-                    }
-                }
-                .padding(24)
-                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                HStack(spacing: 12) {
-                    Button(L10n.tr("新增账号")) {}
-                        .buttonStyle(.borderedProminent)
-                        .disabled(true)
-
-                    Button(L10n.tr("刷新全部状态")) {}
-                        .buttonStyle(.bordered)
-                        .disabled(true)
-                }
+    private func configurationPathText(for account: ManagedAccount) -> String {
+        let platformPaths = model.paths.paths(for: account.platform)
+        switch account.platform {
+        case .codex:
+            return platformPaths.authFileURL?.path ?? platformPaths.homeURL.path
+        case .claude:
+            var values = [platformPaths.homeURL.path]
+            if let userSettingsPath = platformPaths.userSettingsFileURL?.path {
+                values.append(userSettingsPath)
             }
-            .padding(24)
-        }
-    }
-
-    private func placeholderInfoRow(_ label: String, _ value: String) -> some View {
-        GridRow {
-            Text(label)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .textSelection(.enabled)
+            return values.joined(separator: "\n")
         }
     }
 }
@@ -352,6 +318,7 @@ private struct PlatformPlaceholderDetailView: View {
 private struct AccountListRow: View {
     let account: ManagedAccount
     let snapshot: QuotaSnapshot?
+    let claudeSnapshot: ClaudeRateLimitSnapshot?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -373,12 +340,12 @@ private struct AccountListRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            if let snapshot {
-                Label(L10n.tr("剩余 %@", snapshot.remainingSummary), systemImage: "gauge.with.dots.needle.67percent")
+            if let statusSummary {
+                Label(statusSummary, systemImage: "gauge.with.dots.needle.67percent")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text(L10n.tr("额度未同步"))
+                Text(account.platform == .claude ? L10n.tr("状态未同步") : L10n.tr("额度未同步"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -387,10 +354,34 @@ private struct AccountListRow: View {
     }
 
     private var accountSubtitle: String {
-        if account.authMode == .apiKey {
-            return account.email ?? "API Key"
+        switch account.authKind {
+        case .chatgpt:
+            return account.email ?? account.accountIdentifier
+        case .openAIAPIKey:
+            return account.email ?? "OpenAI API Key"
+        case .claudeProfile:
+            return L10n.tr("Claude Profile")
+        case .anthropicAPIKey:
+            return account.email ?? "Anthropic API Key"
         }
-        return account.email ?? account.codexAccountID
+    }
+
+    private var statusSummary: String? {
+        if let snapshot {
+            return L10n.tr("剩余 %@", snapshot.remainingSummary)
+        }
+        if let claudeSnapshot {
+            return L10n.tr("请求剩余 %@", claudeRemainingText(claudeSnapshot.requests.remaining))
+        }
+        if account.platform == .claude, account.authKind == .claudeProfile {
+            return L10n.tr("本地 Profile")
+        }
+        return nil
+    }
+
+    private func claudeRemainingText(_ value: Int?) -> String {
+        guard let value else { return L10n.tr("未知") }
+        return "\(value)"
     }
 }
 
@@ -398,6 +389,7 @@ private struct AccountDetailView: View {
     @ObservedObject var model: AppViewModel
     let account: ManagedAccount
     let snapshot: QuotaSnapshot?
+    let claudeSnapshot: ClaudeRateLimitSnapshot?
     let authFilePath: String
     let onRename: (String) -> Void
     let onRefreshStatus: () -> Void
@@ -457,8 +449,8 @@ private struct AccountDetailView: View {
 
     private var infoGrid: some View {
         Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
-            infoRow(L10n.tr("Auth 模式"), account.authMode.displayName)
-            infoRow(L10n.tr("账号 ID"), account.codexAccountID)
+            infoRow(L10n.tr("账号类型"), account.authKind.displayName)
+            infoRow(L10n.tr("账号 ID"), account.accountIdentifier)
             infoRow(credentialSummaryLabel, credentialSummaryValue)
             infoRow(L10n.tr("套餐类型"), account.planType ?? L10n.tr("未知"))
             if let codexUsageStatusText {
@@ -476,25 +468,34 @@ private struct AccountDetailView: View {
     }
 
     private var credentialSummaryLabel: String {
-        account.authMode == .apiKey ? L10n.tr("Key 摘要") : L10n.tr("邮箱")
+        switch account.authKind {
+        case .chatgpt:
+            return L10n.tr("邮箱")
+        case .openAIAPIKey, .anthropicAPIKey:
+            return L10n.tr("Key 摘要")
+        case .claudeProfile:
+            return L10n.tr("Profile")
+        }
     }
 
     private var credentialSummaryValue: String {
-        if account.authMode == .apiKey {
+        switch account.authKind {
+        case .claudeProfile:
+            return L10n.tr("本地快照")
+        case .chatgpt, .openAIAPIKey, .anthropicAPIKey:
             return account.email ?? L10n.tr("未解析")
         }
-        return account.email ?? L10n.tr("未解析")
     }
 
     private var codexUsageStatusText: String? {
-        if account.authMode == .apiKey {
+        if account.platform != .codex || account.authKind == .openAIAPIKey {
             return nil
         }
         return account.subscriptionDetails?.usageStatusText
     }
 
     private var codexAvailabilityText: String? {
-        if account.authMode == .apiKey {
+        if account.platform != .codex || account.authKind == .openAIAPIKey {
             return nil
         }
         guard let details = account.subscriptionDetails, details.allowed != nil else {
@@ -504,7 +505,7 @@ private struct AccountDetailView: View {
     }
 
     private var codexLimitStatusText: String? {
-        if account.authMode == .apiKey {
+        if account.platform != .codex || account.authKind == .openAIAPIKey {
             return nil
         }
         guard let details = account.subscriptionDetails, details.limitReached != nil else {
@@ -524,31 +525,60 @@ private struct AccountDetailView: View {
 
     private var quotaSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(L10n.tr("额度快照"))
+            Text(account.platform == .codex ? L10n.tr("额度快照") : L10n.tr("限额快照"))
                 .font(.title2.bold())
 
-            if let snapshot {
-                Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
-                    infoRow(L10n.tr("5 小时剩余"), snapshot.primary.remainingPercentText)
-                    infoRow(L10n.tr("7 天剩余"), snapshot.secondary.remainingPercentText)
-                    infoRow(L10n.tr("口径"), L10n.tr("剩余百分比（与 Codex 状态面板一致）"))
-                    infoRow(L10n.tr("计划类型"), snapshot.planType ?? L10n.tr("未知"))
-                    infoRow(L10n.tr("来源"), snapshot.source.displayName)
-                    infoRow(L10n.tr("采集时间"), snapshot.capturedAt.formatted(date: .abbreviated, time: .standard))
-                    infoRow(L10n.tr("5 小时重置"), snapshot.primary.resetsAt?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("未知"))
-                    infoRow(L10n.tr("7 天重置"), snapshot.secondary.resetsAt?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("未知"))
-                    if let credits = snapshot.credits {
-                        infoRow(L10n.tr("Credits"), credits.unlimited ? L10n.tr("unlimited") : (credits.balance.map { "\($0)" } ?? L10n.tr("无")))
+            if account.platform == .codex {
+                if let snapshot {
+                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
+                        infoRow(L10n.tr("5 小时剩余"), snapshot.primary.remainingPercentText)
+                        infoRow(L10n.tr("7 天剩余"), snapshot.secondary.remainingPercentText)
+                        infoRow(L10n.tr("口径"), L10n.tr("剩余百分比（与 Codex 状态面板一致）"))
+                        infoRow(L10n.tr("计划类型"), snapshot.planType ?? L10n.tr("未知"))
+                        infoRow(L10n.tr("来源"), snapshot.source.displayName)
+                        infoRow(L10n.tr("采集时间"), snapshot.capturedAt.formatted(date: .abbreviated, time: .standard))
+                        infoRow(L10n.tr("5 小时重置"), snapshot.primary.resetsAt?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("未知"))
+                        infoRow(L10n.tr("7 天重置"), snapshot.secondary.resetsAt?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("未知"))
+                        if let credits = snapshot.credits {
+                            infoRow(L10n.tr("Credits"), credits.unlimited ? L10n.tr("unlimited") : (credits.balance.map { "\($0)" } ?? L10n.tr("无")))
+                        }
                     }
-                }
-                .padding(24)
-                .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            } else {
-                Text(L10n.tr("这个账号还没有被可靠归档的本地额度快照。切换到该账号并实际使用一段时间后，应用会从本地会话事件中抓取额度。"))
-                    .foregroundStyle(.secondary)
                     .padding(24)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                } else {
+                    Text(L10n.tr("这个账号还没有被可靠归档的本地额度快照。切换到该账号并实际使用一段时间后，应用会从本地会话事件中抓取额度。"))
+                        .foregroundStyle(.secondary)
+                        .padding(24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+            } else {
+                if let claudeSnapshot {
+                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
+                        infoRow(L10n.tr("Requests"), claudeValueSummary(claudeSnapshot.requests))
+                        infoRow(L10n.tr("Requests 重置"), formattedDate(claudeSnapshot.requests.resetAt))
+                        infoRow(L10n.tr("Input Tokens"), claudeValueSummary(claudeSnapshot.inputTokens))
+                        infoRow(L10n.tr("Input Tokens 重置"), formattedDate(claudeSnapshot.inputTokens.resetAt))
+                        infoRow(L10n.tr("Output Tokens"), claudeValueSummary(claudeSnapshot.outputTokens))
+                        infoRow(L10n.tr("Output Tokens 重置"), formattedDate(claudeSnapshot.outputTokens.resetAt))
+                        infoRow(L10n.tr("来源"), claudeSnapshot.source.displayName)
+                        infoRow(L10n.tr("采集时间"), claudeSnapshot.capturedAt.formatted(date: .abbreviated, time: .standard))
+                    }
+                    .padding(24)
+                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                } else if account.authKind == .claudeProfile {
+                    Text(L10n.tr("这是本地 Claude Profile；应用不会在线刷新 claude.ai 登录态，可直接从应用启动 Claude CLI 验证。"))
+                        .foregroundStyle(.secondary)
+                        .padding(24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                } else {
+                    Text(L10n.tr("还没有刷新过 Anthropic 限额。手动更新状态后，应用会读取响应头中的 requests 和 token 限额信息。"))
+                        .foregroundStyle(.secondary)
+                        .padding(24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
             }
         }
     }
@@ -561,7 +591,7 @@ private struct AccountDetailView: View {
             Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 10) {
                 infoRow(L10n.tr("上次检查"), account.lastStatusCheckAt?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("尚未手动更新"))
                 infoRow(L10n.tr("最近结果"), account.lastStatusMessage ?? L10n.tr("尚未手动更新"))
-                infoRow(L10n.tr("说明"), L10n.tr("手动更新会在线刷新该账号凭据并同步在线额度；界面统一按剩余百分比展示。"))
+                infoRow(L10n.tr("说明"), statusDescriptionText)
             }
             .padding(24)
             .background(statusBackgroundColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -586,16 +616,18 @@ private struct AccountDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
 
-                Button(isolatedInstanceButtonTitle) {
-                    Task { await model.launchIsolatedCodex(for: account) }
+                if account.platform == .codex {
+                    Button(isolatedInstanceButtonTitle) {
+                        Task { await model.launchIsolatedCodex(for: account) }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(
+                        !model.canLaunchIsolatedCodex(for: account)
+                            || model.isLaunchingIsolatedInstance(for: account.id)
+                            || model.isLaunchingCLI(for: account.id)
+                            || model.isSwitchInProgress
+                    )
                 }
-                .buttonStyle(.bordered)
-                .disabled(
-                    !model.canLaunchIsolatedCodex(for: account)
-                        || model.isLaunchingIsolatedInstance(for: account.id)
-                        || model.isLaunchingCLI(for: account.id)
-                        || model.isSwitchInProgress
-                )
 
                 Button(model.isLaunchingCLI(for: account.id) ? L10n.tr("正在打开 CLI...") : L10n.tr("选择目录并打开 CLI")) {
                     chooseDirectoryAndOpenCLI()
@@ -618,9 +650,11 @@ private struct AccountDetailView: View {
                 }
             }
 
-            Text(isolatedLaunchHelpText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if account.platform == .codex {
+                Text(isolatedLaunchHelpText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(20)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -684,7 +718,7 @@ private struct AccountDetailView: View {
         if model.hasLaunchedIsolatedInstance(for: account.id) {
             return L10n.tr("该账号的独立实例已在当前会话中启动，为避免重复拉起，当前已禁用再次启动。")
         }
-        if account.isActive && account.authMode == .chatgpt {
+        if account.isActive && account.authKind == .chatgpt {
             return L10n.tr("打开 CLI 会直接使用当前 ~/.codex；当前活跃的 ChatGPT 账号不能再起独立实例，避免触发 refresh_token_reused。")
         }
         if account.isActive {
@@ -713,8 +747,10 @@ private struct AccountDetailView: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
-        panel.prompt = L10n.tr("打开 CLI")
-        panel.message = L10n.tr("选择一个目录作为 Codex CLI 的启动目录。")
+        panel.prompt = account.platform == .codex ? L10n.tr("打开 CLI") : L10n.tr("打开 Claude CLI")
+        panel.message = account.platform == .codex
+            ? L10n.tr("选择一个目录作为 Codex CLI 的启动目录。")
+            : L10n.tr("选择一个目录作为 Claude CLI 的启动目录。")
         if let path = recentCLIDirectories.first {
             panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
         }
@@ -731,7 +767,7 @@ private struct AccountDetailView: View {
 
     private var pathSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(L10n.tr("当前写入路径"))
+            Text(account.platform == .codex ? L10n.tr("当前写入路径") : L10n.tr("配置路径"))
                 .font(.title2.bold())
             Text(authFilePath)
                 .font(.callout.monospaced())
@@ -749,6 +785,29 @@ private struct AccountDetailView: View {
         case .error:
             return Color.red.opacity(0.12)
         }
+    }
+
+    private var statusDescriptionText: String {
+        switch (account.platform, account.authKind) {
+        case (.codex, _):
+            return L10n.tr("手动更新会在线刷新该账号凭据并同步在线额度；界面统一按剩余百分比展示。")
+        case (.claude, .claudeProfile):
+            return L10n.tr("手动更新只记录本地 Claude Profile 状态，不会同步 claude.ai 登录态。")
+        case (.claude, .anthropicAPIKey):
+            return L10n.tr("手动更新会向 Anthropic 发起极小探测请求，并读取响应头中的 requests 与 token 限额。")
+        case (.claude, _):
+            return L10n.tr("手动更新会刷新当前账号状态。")
+        }
+    }
+
+    private func formattedDate(_ date: Date?) -> String {
+        date?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("未知")
+    }
+
+    private func claudeValueSummary(_ value: ClaudeRateLimitValueSnapshot) -> String {
+        let remaining = value.remaining.map(String.init) ?? L10n.tr("未知")
+        let limit = value.limit.map(String.init) ?? L10n.tr("未知")
+        return "\(remaining) / \(limit)"
     }
 }
 
@@ -886,6 +945,7 @@ private struct MenuBarPanelHeightPreferenceKey: PreferenceKey {
 private struct MenuBarAccountRow: View {
     let account: ManagedAccount
     let snapshot: QuotaSnapshot?
+    let claudeSnapshot: ClaudeRateLimitSnapshot?
     let switchButtonTitle: String
     let isSwitchDisabled: Bool
     let onSwitch: () -> Void
@@ -898,13 +958,13 @@ private struct MenuBarAccountRow: View {
                     .foregroundStyle(.primary)
                     .lineLimit(1)
 
-                if let snapshot {
-                    Text(L10n.tr("剩余 %@", snapshot.remainingSummary))
+                if let summaryText {
+                    Text(summaryText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
-                    Text(L10n.tr("额度未同步"))
+                    Text(account.platform == .claude ? L10n.tr("状态未同步") : L10n.tr("额度未同步"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -949,6 +1009,22 @@ private struct MenuBarAccountRow: View {
     private var borderColor: Color {
         account.isActive ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035)
     }
+
+    private var summaryText: String? {
+        if let snapshot {
+            return L10n.tr("剩余 %@", snapshot.remainingSummary)
+        }
+        if let claudeSnapshot {
+            if let remaining = claudeSnapshot.requests.remaining {
+                return L10n.tr("请求剩余 %@", "\(remaining)")
+            }
+            return L10n.tr("请求剩余 未知")
+        }
+        if account.platform == .claude, account.authKind == .claudeProfile {
+            return L10n.tr("本地 Profile")
+        }
+        return nil
+    }
 }
 
 struct MenuBarContentView: View {
@@ -982,6 +1058,7 @@ struct MenuBarContentView: View {
                             MenuBarAccountRow(
                                 account: account,
                                 snapshot: model.snapshot(for: account.id),
+                                claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
                                 switchButtonTitle: switchButtonTitle(for: account),
                                 isSwitchDisabled: account.isActive || model.isSwitchInProgress,
                                 onSwitch: {
@@ -1010,7 +1087,7 @@ struct MenuBarContentView: View {
 
             Divider()
 
-            if model.isClaudePlaceholderSelected {
+            if !model.selectedPlatformUnsupportedMessage.isEmpty {
                 Text(model.selectedPlatformUnsupportedMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1054,7 +1131,7 @@ struct MenuBarContentView: View {
     }
 
     private var shouldShowStandaloneRestartAction: Bool {
-        model.canQuickRestartCodex && model.restartPromptMessage == nil
+        model.selectedPlatform == .codex && model.canQuickRestartCodex && model.restartPromptMessage == nil
     }
 
     private func switchButtonTitle(for account: ManagedAccount) -> String {
@@ -1073,7 +1150,7 @@ struct MenuBarContentView: View {
                 .font(.caption.bold())
                 .foregroundStyle(.secondary)
 
-            if let recommendation = model.lowQuotaSwitchRecommendation {
+            if model.selectedPlatform == .codex, let recommendation = model.lowQuotaSwitchRecommendation {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(recommendation.promptTitle)
                         .font(.callout.weight(.medium))
@@ -1097,7 +1174,7 @@ struct MenuBarContentView: View {
                 .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
-            if let promptMessage = model.restartPromptMessage {
+            if model.selectedPlatform == .codex, let promptMessage = model.restartPromptMessage {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(L10n.tr("切换完成后，是否现在重启 Codex？"))
                         .font(.callout.weight(.medium))

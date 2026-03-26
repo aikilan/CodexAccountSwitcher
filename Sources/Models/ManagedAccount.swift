@@ -54,10 +54,10 @@ extension SubscriptionDetails {
 struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var platform: PlatformKind
-    var codexAccountID: String
+    var accountIdentifier: String
     var displayName: String
     var email: String?
-    var authMode: CodexAuthMode
+    var authKind: ManagedAuthKind
     var createdAt: Date
     var lastUsedAt: Date?
     var lastQuotaSnapshotAt: Date?
@@ -72,10 +72,10 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
     init(
         id: UUID,
         platform: PlatformKind = .codex,
-        codexAccountID: String,
+        accountIdentifier: String,
         displayName: String,
         email: String?,
-        authMode: CodexAuthMode,
+        authKind: ManagedAuthKind,
         createdAt: Date,
         lastUsedAt: Date?,
         lastQuotaSnapshotAt: Date?,
@@ -89,10 +89,10 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.platform = platform
-        self.codexAccountID = codexAccountID
+        self.accountIdentifier = accountIdentifier
         self.displayName = displayName
         self.email = email
-        self.authMode = authMode
+        self.authKind = authKind
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.lastQuotaSnapshotAt = lastQuotaSnapshotAt
@@ -110,10 +110,10 @@ extension ManagedAccount {
     private enum CodingKeys: String, CodingKey {
         case id
         case platform
-        case codexAccountID
+        case accountIdentifier
         case displayName
         case email
-        case authMode
+        case authKind
         case createdAt
         case lastUsedAt
         case lastQuotaSnapshotAt
@@ -124,16 +124,20 @@ extension ManagedAccount {
         case lastStatusMessage
         case lastStatusLevel
         case isActive
+        case codexAccountID
+        case authMode
     }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
         self.platform = try container.decodeIfPresent(PlatformKind.self, forKey: .platform) ?? .codex
-        self.codexAccountID = try container.decode(String.self, forKey: .codexAccountID)
+        self.accountIdentifier = try container.decodeIfPresent(String.self, forKey: .accountIdentifier)
+            ?? container.decode(String.self, forKey: .codexAccountID)
         self.displayName = try container.decode(String.self, forKey: .displayName)
         self.email = try container.decodeIfPresent(String.self, forKey: .email)
-        self.authMode = try container.decode(CodexAuthMode.self, forKey: .authMode)
+        self.authKind = try container.decodeIfPresent(ManagedAuthKind.self, forKey: .authKind)
+            ?? container.decode(ManagedAuthKind.self, forKey: .authMode)
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         self.lastQuotaSnapshotAt = try container.decodeIfPresent(Date.self, forKey: .lastQuotaSnapshotAt)
@@ -145,6 +149,40 @@ extension ManagedAccount {
         self.lastStatusLevel = try container.decodeIfPresent(SwitchLogLevel.self, forKey: .lastStatusLevel)
         self.isActive = try container.decode(Bool.self, forKey: .isActive)
     }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(platform, forKey: .platform)
+        try container.encode(accountIdentifier, forKey: .accountIdentifier)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encodeIfPresent(email, forKey: .email)
+        try container.encode(authKind, forKey: .authKind)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
+        try container.encodeIfPresent(lastQuotaSnapshotAt, forKey: .lastQuotaSnapshotAt)
+        try container.encodeIfPresent(lastRefreshAt, forKey: .lastRefreshAt)
+        try container.encodeIfPresent(planType, forKey: .planType)
+        try container.encodeIfPresent(subscriptionDetails, forKey: .subscriptionDetails)
+        try container.encodeIfPresent(lastStatusCheckAt, forKey: .lastStatusCheckAt)
+        try container.encodeIfPresent(lastStatusMessage, forKey: .lastStatusMessage)
+        try container.encodeIfPresent(lastStatusLevel, forKey: .lastStatusLevel)
+        try container.encode(isActive, forKey: .isActive)
+    }
+}
+
+struct ClaudeRateLimitValueSnapshot: Codable, Hashable, Sendable {
+    var limit: Int?
+    var remaining: Int?
+    var resetAt: Date?
+}
+
+struct ClaudeRateLimitSnapshot: Codable, Hashable, Sendable {
+    var requests: ClaudeRateLimitValueSnapshot
+    var inputTokens: ClaudeRateLimitValueSnapshot
+    var outputTokens: ClaudeRateLimitValueSnapshot
+    var capturedAt: Date
+    var source: QuotaSnapshotSource
 }
 
 enum SwitchLogLevel: String, Codable, Hashable, Sendable {
@@ -164,16 +202,18 @@ struct AppDatabase: Codable, Sendable {
     var version: Int
     var accounts: [ManagedAccount]
     var quotaSnapshots: [String: QuotaSnapshot]
+    var claudeRateLimitSnapshots: [String: ClaudeRateLimitSnapshot]
     var switchLogs: [SwitchLogEntry]
     var cliWorkingDirectoriesByAccountID: [String: [String]] = [:]
     var activeAccountID: UUID?
 
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     static let empty = AppDatabase(
         version: currentVersion,
         accounts: [],
         quotaSnapshots: [:],
+        claudeRateLimitSnapshots: [:],
         switchLogs: [],
         cliWorkingDirectoriesByAccountID: [:],
         activeAccountID: nil
@@ -186,6 +226,10 @@ struct AppDatabase: Codable, Sendable {
 
     func snapshot(for accountID: UUID) -> QuotaSnapshot? {
         quotaSnapshots[accountID.uuidString]
+    }
+
+    func claudeRateLimitSnapshot(for accountID: UUID) -> ClaudeRateLimitSnapshot? {
+        claudeRateLimitSnapshots[accountID.uuidString]
     }
 
     func cliWorkingDirectories(for accountID: UUID) -> [String] {
@@ -204,7 +248,7 @@ struct AppDatabase: Codable, Sendable {
 
     mutating func upsert(account: ManagedAccount) {
         if let index = accounts.firstIndex(where: {
-            $0.id == account.id || ($0.platform == account.platform && $0.codexAccountID == account.codexAccountID)
+            $0.id == account.id || ($0.platform == account.platform && $0.accountIdentifier == account.accountIdentifier)
         }) {
             accounts[index] = account
         } else {
@@ -216,6 +260,7 @@ struct AppDatabase: Codable, Sendable {
     mutating func removeAccount(id: UUID) {
         accounts.removeAll(where: { $0.id == id })
         quotaSnapshots.removeValue(forKey: id.uuidString)
+        claudeRateLimitSnapshots.removeValue(forKey: id.uuidString)
         cliWorkingDirectoriesByAccountID.removeValue(forKey: id.uuidString)
         if activeAccountID == id {
             activeAccountID = nil
@@ -226,6 +271,12 @@ struct AppDatabase: Codable, Sendable {
         quotaSnapshots[accountID.uuidString] = snapshot
         guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
         accounts[index].lastQuotaSnapshotAt = snapshot.capturedAt
+    }
+
+    mutating func updateClaudeRateLimitSnapshot(_ snapshot: ClaudeRateLimitSnapshot, for accountID: UUID) {
+        claudeRateLimitSnapshots[accountID.uuidString] = snapshot
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        accounts[index].lastRefreshAt = snapshot.capturedAt
     }
 
     mutating func appendLog(level: SwitchLogLevel, message: String) {
@@ -256,6 +307,7 @@ extension AppDatabase {
         case version
         case accounts
         case quotaSnapshots
+        case claudeRateLimitSnapshots
         case switchLogs
         case cliWorkingDirectoriesByAccountID
         case activeAccountID
@@ -266,6 +318,7 @@ extension AppDatabase {
         let version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         let accounts = try container.decodeIfPresent([ManagedAccount].self, forKey: .accounts) ?? []
         let quotaSnapshots = try container.decodeIfPresent([String: QuotaSnapshot].self, forKey: .quotaSnapshots) ?? [:]
+        let claudeRateLimitSnapshots = try container.decodeIfPresent([String: ClaudeRateLimitSnapshot].self, forKey: .claudeRateLimitSnapshots) ?? [:]
         let switchLogs = try container.decodeIfPresent([SwitchLogEntry].self, forKey: .switchLogs) ?? []
         let cliWorkingDirectoriesByAccountID = try container.decodeIfPresent([String: [String]].self, forKey: .cliWorkingDirectoriesByAccountID) ?? [:]
         let activeAccountID = try container.decodeIfPresent(UUID.self, forKey: .activeAccountID)
@@ -274,6 +327,7 @@ extension AppDatabase {
             version: max(version, Self.currentVersion),
             accounts: accounts,
             quotaSnapshots: quotaSnapshots,
+            claudeRateLimitSnapshots: claudeRateLimitSnapshots,
             switchLogs: switchLogs,
             cliWorkingDirectoriesByAccountID: cliWorkingDirectoriesByAccountID,
             activeAccountID: activeAccountID

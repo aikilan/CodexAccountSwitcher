@@ -60,7 +60,9 @@ struct LowQuotaSwitchRecommendation: Equatable, Sendable {
 
 enum AddAccountMode: String, CaseIterable, Identifiable {
     case browser
-    case apiKey
+    case openAIAPIKey
+    case claudeProfile
+    case anthropicAPIKey
 
     var id: String { rawValue }
 
@@ -68,8 +70,21 @@ enum AddAccountMode: String, CaseIterable, Identifiable {
         switch self {
         case .browser:
             return L10n.tr("浏览器登录")
-        case .apiKey:
-            return L10n.tr("API Key")
+        case .openAIAPIKey:
+            return L10n.tr("OpenAI API Key")
+        case .claudeProfile:
+            return L10n.tr("导入当前 Claude Profile")
+        case .anthropicAPIKey:
+            return L10n.tr("Anthropic API Key")
+        }
+    }
+
+    static func modes(for platform: PlatformKind) -> [AddAccountMode] {
+        switch platform {
+        case .codex:
+            return [.browser, .openAIAPIKey]
+        case .claude:
+            return [.claudeProfile, .anthropicAPIKey]
         }
     }
 }
@@ -117,11 +132,14 @@ final class AppViewModel: ObservableObject {
     private let authFileManager: any AuthFileManaging
     private let jwtDecoder: JWTClaimsDecoder
     private let oauthClient: any OAuthClienting
+    private let claudeProfileManager: any ClaudeProfileManaging
+    private let claudeAPIClient: any ClaudeAPIClienting
     private let quotaMonitor: any QuotaMonitoring
     private let userNotifier: any UserNotifying
     private let runtimeInspector: any CodexRuntimeInspecting
     private let instanceLauncher: any CodexInstanceLaunching
-    private let cliLauncher: any CodexCLILaunching
+    private let codexCLILauncher: any CodexCLILaunching
+    private let claudeCLILauncher: any ClaudeCLILaunching
     private let runtimes: [PlatformKind: any PlatformRuntime]
     private let bannerAutoDismissDuration: Duration
     private var browserSession: BrowserOAuthSession?
@@ -140,11 +158,14 @@ final class AppViewModel: ObservableObject {
         authFileManager: any AuthFileManaging,
         jwtDecoder: JWTClaimsDecoder,
         oauthClient: any OAuthClienting,
+        claudeProfileManager: any ClaudeProfileManaging,
+        claudeAPIClient: any ClaudeAPIClienting,
         quotaMonitor: any QuotaMonitoring,
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
         instanceLauncher: any CodexInstanceLaunching = CodexInstanceLauncher(),
-        cliLauncher: any CodexCLILaunching = CodexCLILauncher(),
+        codexCLILauncher: any CodexCLILaunching = CodexCLILauncher(),
+        claudeCLILauncher: any ClaudeCLILaunching = ClaudeCLILauncher(),
         platformRuntimes: [any PlatformRuntime] = [CodexPlatformRuntime(), ClaudePlatformRuntime()],
         bannerAutoDismissDuration: Duration = .seconds(10)
     ) {
@@ -154,11 +175,14 @@ final class AppViewModel: ObservableObject {
         self.authFileManager = authFileManager
         self.jwtDecoder = jwtDecoder
         self.oauthClient = oauthClient
+        self.claudeProfileManager = claudeProfileManager
+        self.claudeAPIClient = claudeAPIClient
         self.quotaMonitor = quotaMonitor
         self.userNotifier = userNotifier
         self.runtimeInspector = runtimeInspector
         self.instanceLauncher = instanceLauncher
-        self.cliLauncher = cliLauncher
+        self.codexCLILauncher = codexCLILauncher
+        self.claudeCLILauncher = claudeCLILauncher
         self.runtimes = Dictionary(uniqueKeysWithValues: platformRuntimes.map { ($0.platform, $0) })
         self.bannerAutoDismissDuration = bannerAutoDismissDuration
     }
@@ -173,6 +197,8 @@ final class AppViewModel: ObservableObject {
             let authFileManager = AuthFileManager(authFileURL: paths.authFileURL)
             let jwtDecoder = JWTClaimsDecoder()
             let oauthClient = OAuthClient()
+            let claudeProfileManager = ClaudeProfileSnapshotManager(paths: paths)
+            let claudeAPIClient = ClaudeAPIClient()
             let logReader = SQLiteLogReader(databaseURL: paths.stateDatabaseURL)
             let quotaMonitor = QuotaMonitor(
                 sessionScanner: SessionQuotaScanner(sessionsDirectoryURL: paths.sessionsDirectoryURL),
@@ -187,10 +213,13 @@ final class AppViewModel: ObservableObject {
                 authFileManager: authFileManager,
                 jwtDecoder: jwtDecoder,
                 oauthClient: oauthClient,
+                claudeProfileManager: claudeProfileManager,
+                claudeAPIClient: claudeAPIClient,
                 quotaMonitor: quotaMonitor,
                 userNotifier: userNotifier,
                 runtimeInspector: runtimeInspector,
-                cliLauncher: CodexCLILauncher(),
+                codexCLILauncher: CodexCLILauncher(),
+                claudeCLILauncher: ClaudeCLILauncher(),
                 platformRuntimes: [CodexPlatformRuntime(), ClaudePlatformRuntime()]
             )
         } catch {
@@ -250,7 +279,11 @@ final class AppViewModel: ObservableObject {
     }
 
     var selectedPlatformAddAccountMessage: String {
-        addAccountMessage(for: addAccountPlatform)
+        addAccountMessage(for: addAccountPlatform, mode: addAccountMode)
+    }
+
+    var availableAddAccountModes: [AddAccountMode] {
+        AddAccountMode.modes(for: addAccountPlatform)
     }
 
     var canAddAccountsOnSelectedPlatform: Bool {
@@ -259,10 +292,6 @@ final class AppViewModel: ObservableObject {
 
     var canAddAccountsInSheet: Bool {
         (runtimes[addAccountPlatform]?.capabilities ?? .placeholder).supportsAccountAddition
-    }
-
-    var isClaudePlaceholderSelected: Bool {
-        selectedPlatform == .claude
     }
 
     func isRefreshingStatus(for accountID: UUID) -> Bool {
@@ -291,7 +320,7 @@ final class AppViewModel: ObservableObject {
 
     func canLaunchIsolatedCodex(for account: ManagedAccount) -> Bool {
         guard account.platform == .codex else { return false }
-        return !(account.isActive && account.authMode == .chatgpt) && !hasLaunchedIsolatedInstance(for: account.id)
+        return !(account.isActive && account.authKind == .chatgpt) && !hasLaunchedIsolatedInstance(for: account.id)
     }
 
     var isSwitchInProgress: Bool {
@@ -300,6 +329,10 @@ final class AppViewModel: ObservableObject {
 
     func snapshot(for accountID: UUID) -> QuotaSnapshot? {
         database.snapshot(for: accountID)
+    }
+
+    func claudeRateLimitSnapshot(for accountID: UUID) -> ClaudeRateLimitSnapshot? {
+        database.claudeRateLimitSnapshot(for: accountID)
     }
 
     func cliWorkingDirectories(for accountID: UUID) -> [String] {
@@ -323,6 +356,7 @@ final class AppViewModel: ObservableObject {
         guard selectedPlatform != platform else { return }
         selectedPlatform = platform
         addAccountPlatform = platform
+        addAccountMode = availableAddAccountModes.first ?? .browser
         syncSelectionForSelectedPlatform()
     }
 
@@ -363,20 +397,25 @@ final class AppViewModel: ObservableObject {
     func importCurrentAuthIfNeeded() async {
         do {
             guard let payload = try authFileManager.readCurrentAuth() else { return }
+            let hasClaudeActiveAccount = database.account(id: database.activeAccountID)?.platform == .claude
             let identity = try resolveIdentity(from: payload)
-            let account = upsertAccount(identity: identity, payload: payload, makeActive: true)
-            try credentialStore.save(payload, for: account.id)
+            let account = try syncCurrentCodexAccount(identity: identity, payload: payload, makeActive: !hasClaudeActiveAccount)
 
-            if database.snapshot(for: account.id) == nil, let snapshot = quotaMonitor.bootstrapSnapshot() {
-                database.updateSnapshot(snapshot, for: account.id)
-                evaluateLowQuotaSwitchRecommendation()
+            if hasClaudeActiveAccount {
+                if selectedPlatform == .codex, database.account(id: selectedAccountID)?.platform != .codex {
+                    selectedAccountID = account.id
+                }
+                database.appendLog(
+                    level: .info,
+                    message: L10n.tr("检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。", account.displayName)
+                )
+            } else {
+                setActiveAccount(account.id)
+                if selectedPlatform == .codex {
+                    selectedAccountID = selectedAccountID ?? account.id
+                }
+                database.appendLog(level: .info, message: L10n.tr("已导入当前 ~/.codex/auth.json 对应的账号。"))
             }
-
-            setActiveAccount(account.id)
-            if selectedPlatform == .codex {
-                selectedAccountID = selectedAccountID ?? account.id
-            }
-            database.appendLog(level: .info, message: L10n.tr("已导入当前 ~/.codex/auth.json 对应的账号。"))
             try await persistDatabase()
         } catch {
             pushBanner(level: .warning, message: L10n.tr("当前 auth.json 无法导入：%@", error.localizedDescription))
@@ -385,11 +424,15 @@ final class AppViewModel: ObservableObject {
 
     func reconcileCurrentAuthState() async {
         guard hasLoaded, !isReconcilingCurrentAuth else { return }
+        let hasClaudeActiveAccount = database.account(id: database.activeAccountID)?.platform == .claude
         isReconcilingCurrentAuth = true
         defer { isReconcilingCurrentAuth = false }
 
         do {
             guard let payload = try authFileManager.readCurrentAuth() else {
+                if hasClaudeActiveAccount {
+                    return
+                }
                 guard let previousActiveID = database.activeAccountID else { return }
                 setActiveAccount(nil)
                 if selectedAccountID == previousActiveID {
@@ -403,23 +446,27 @@ final class AppViewModel: ObservableObject {
             let identity = try resolveIdentity(from: payload)
             let previousActiveID = database.activeAccountID
             let existingAccountID = database.accounts.first(where: {
-                $0.platform == .codex && $0.codexAccountID == identity.accountID
+                $0.platform == .codex && $0.accountIdentifier == identity.accountID
             })?.id
-            let account = upsertAccount(identity: identity, payload: payload, makeActive: true)
-            try credentialStore.save(payload, for: account.id)
+            let account = try syncCurrentCodexAccount(identity: identity, payload: payload, makeActive: !hasClaudeActiveAccount)
 
-            if database.snapshot(for: account.id) == nil, let snapshot = quotaMonitor.bootstrapSnapshot() {
-                database.updateSnapshot(snapshot, for: account.id)
-                evaluateLowQuotaSwitchRecommendation()
-            }
+            if hasClaudeActiveAccount {
+                if selectedPlatform == .codex, database.account(id: selectedAccountID)?.platform != .codex {
+                    selectedAccountID = account.id
+                }
+                database.appendLog(
+                    level: .info,
+                    message: L10n.tr("检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。", account.displayName)
+                )
+            } else {
+                setActiveAccount(account.id)
+                if selectedPlatform == .codex, (selectedAccountID == nil || previousActiveID != account.id) {
+                    selectedAccountID = account.id
+                }
 
-            setActiveAccount(account.id)
-            if selectedPlatform == .codex, (selectedAccountID == nil || previousActiveID != account.id) {
-                selectedAccountID = account.id
-            }
-
-            if previousActiveID != account.id || existingAccountID == nil {
-                database.appendLog(level: .info, message: L10n.tr("检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步当前账号。", account.displayName))
+                if previousActiveID != account.id || existingAccountID == nil {
+                    database.appendLog(level: .info, message: L10n.tr("检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步当前账号。", account.displayName))
+                }
             }
 
             try await persistDatabase()
@@ -446,10 +493,6 @@ final class AppViewModel: ObservableObject {
     }
 
     func openCodexCLI(for account: ManagedAccount, workingDirectoryURL: URL) async {
-        guard account.platform == .codex else {
-            pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
-            return
-        }
         guard launchingCLIAccountID == nil else { return }
         launchingCLIAccountID = account.id
         defer {
@@ -459,47 +502,23 @@ final class AppViewModel: ObservableObject {
         }
 
         do {
-            if account.isActive {
-                try cliLauncher.launchCLI(
-                    for: account,
-                    mode: .globalCurrentAuth,
-                    workingDirectoryURL: workingDirectoryURL,
-                    appSupportDirectoryURL: paths.appSupportDirectoryURL
-                )
-                database.rememberCLIWorkingDirectory(workingDirectoryURL, for: account.id)
-                try? await persistDatabase()
-                pushBanner(level: .info, message: L10n.tr("已为账号 %@ 打开 Codex CLI。", account.displayName))
-                return
+            switch account.platform {
+            case .codex:
+                try await openCodexCLIImpl(for: account, workingDirectoryURL: workingDirectoryURL)
+            case .claude:
+                try await openClaudeCLIImpl(for: account, workingDirectoryURL: workingDirectoryURL)
             }
-
-            let cachedPayload = try latestPayloadForRefresh(for: account)
-            var payload = cachedPayload
-
-            if payload.authMode == .chatgpt {
-                do {
-                    let refreshed = try await oauthClient.refreshAuth(using: payload)
-                    payload = refreshed.payload
-                    try credentialStore.save(refreshed.payload, for: account.id)
-                    let refreshedAccount = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: false)
-                    database.appendLog(level: .info, message: L10n.tr("打开 CLI 前已在线刷新账号 %@ 的凭据。", refreshedAccount.displayName))
-                    try? await persistDatabase()
-                } catch {
-                    database.appendLog(level: .warning, message: L10n.tr("打开 CLI 前在线刷新账号 %@ 失败，已回退当前本地凭据：%@", account.displayName, error.localizedDescription))
-                    try? await persistDatabase()
-                }
-            }
-
-            try cliLauncher.launchCLI(
-                for: account,
-                mode: .isolatedAccount(payload: payload),
-                workingDirectoryURL: workingDirectoryURL,
-                appSupportDirectoryURL: paths.appSupportDirectoryURL
-            )
             database.rememberCLIWorkingDirectory(workingDirectoryURL, for: account.id)
             try? await persistDatabase()
-            pushBanner(level: .info, message: L10n.tr("已为账号 %@ 打开 Codex CLI。", account.displayName))
+            let successMessage = account.platform == .codex
+                ? L10n.tr("已为账号 %@ 打开 Codex CLI。", account.displayName)
+                : L10n.tr("已为账号 %@ 打开 Claude CLI。", account.displayName)
+            pushBanner(level: .info, message: successMessage)
         } catch {
-            pushBanner(level: .error, message: L10n.tr("打开 Codex CLI 失败：%@", error.localizedDescription))
+            let errorMessage = account.platform == .codex
+                ? L10n.tr("打开 Codex CLI 失败：%@", error.localizedDescription)
+                : L10n.tr("打开 Claude CLI 失败：%@", error.localizedDescription)
+            pushBanner(level: .error, message: errorMessage)
         }
     }
 
@@ -525,22 +544,22 @@ final class AppViewModel: ObservableObject {
         }
 
         do {
-            let cachedPayload = try latestPayloadForRefresh(for: account)
+            let cachedPayload = try latestCodexPayloadForRefresh(for: account)
             var payload = cachedPayload
 
             if account.isActive,
                let currentPayload = try authFileManager.readCurrentAuth(),
-               currentPayload.accountIdentifier == account.codexAccountID
+               currentPayload.accountIdentifier == account.accountIdentifier
             {
                 payload = currentPayload
-                try credentialStore.save(currentPayload, for: account.id)
+                try credentialStore.save(.codex(currentPayload), for: account.id)
             }
 
             if payload.authMode == .chatgpt {
                 do {
                     let refreshed = try await oauthClient.refreshAuth(using: payload)
                     payload = refreshed.payload
-                    try credentialStore.save(refreshed.payload, for: account.id)
+                    try credentialStore.save(.codex(refreshed.payload), for: account.id)
                     let refreshedAccount = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: account.isActive)
                     database.appendLog(level: .info, message: L10n.tr("独立实例启动前已在线刷新账号 %@ 的凭据。", refreshedAccount.displayName))
                     try? await persistDatabase()
@@ -614,7 +633,7 @@ final class AppViewModel: ObservableObject {
 
         do {
             let result = try await oauthClient.completeBrowserLogin(session: session, pastedInput: pastedInput)
-            try await finalizeLogin(result)
+            try await finalizeCodexLogin(result)
         } catch {
             addAccountError = error.localizedDescription
             addAccountStatus = L10n.tr("手动回调验证失败。")
@@ -626,17 +645,14 @@ final class AppViewModel: ObservableObject {
     }
 
     func startAPIKeyLogin() async {
-        guard addAccountPlatform == .codex else {
-            addAccountError = nil
-            addAccountStatus = selectedPlatformAddAccountMessage
-            return
-        }
         addAccountError = nil
         let apiKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let preferredDisplayName = apiKeyDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !apiKey.isEmpty else {
-            addAccountError = L10n.tr("请输入 API Key。")
+            addAccountError = addAccountPlatform == .codex
+                ? L10n.tr("请输入 API Key。")
+                : L10n.tr("请输入 Anthropic API Key。")
             return
         }
 
@@ -644,12 +660,26 @@ final class AppViewModel: ObservableObject {
         isAuthenticating = true
 
         do {
-            let payload = try CodexAuthPayload(authMode: .apiKey, openAIAPIKey: apiKey).validated()
-            let identity = try resolveIdentity(
-                from: payload,
-                preferredDisplayName: preferredDisplayName.isEmpty ? nil : preferredDisplayName
-            )
-            try await finalizeLogin(AuthLoginResult(payload: payload, identity: identity))
+            switch addAccountPlatform {
+            case .codex:
+                let payload = try CodexAuthPayload(authMode: .openAIAPIKey, openAIAPIKey: apiKey).validated()
+                let identity = try resolveIdentity(
+                    from: payload,
+                    preferredDisplayName: preferredDisplayName.isEmpty ? nil : preferredDisplayName
+                )
+                try await finalizeCodexLogin(AuthLoginResult(payload: payload, identity: identity))
+            case .claude:
+                let credential = try AnthropicAPIKeyCredential(apiKey: apiKey).validated()
+                let identity = resolveAnthropicIdentity(
+                    from: credential,
+                    preferredDisplayName: preferredDisplayName.isEmpty ? nil : preferredDisplayName
+                )
+                try await finalizeClaudeLogin(
+                    identity: identity,
+                    credential: .anthropicAPIKey(credential),
+                    activateProfile: false
+                )
+            }
         } catch {
             addAccountError = error.localizedDescription
             addAccountStatus = L10n.tr("API Key 接入失败。")
@@ -660,11 +690,40 @@ final class AppViewModel: ObservableObject {
         isAuthenticating = false
     }
 
-    func switchToAccount(_ account: ManagedAccount) async {
-        guard account.platform == .codex else {
-            pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
+    func importClaudeProfile() async {
+        guard addAccountPlatform == .claude else {
+            addAccountError = nil
+            addAccountStatus = selectedPlatformAddAccountMessage
             return
         }
+
+        addAccountError = nil
+        addAccountStatus = L10n.tr("正在导入当前 Claude Profile。")
+        isAuthenticating = true
+
+        do {
+            let snapshotRef = try claudeProfileManager.importCurrentProfile()
+            let preferredDisplayName = apiKeyDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let identity = resolveClaudeProfileIdentity(
+                from: snapshotRef,
+                preferredDisplayName: preferredDisplayName.isEmpty ? nil : preferredDisplayName
+            )
+            try await finalizeClaudeLogin(
+                identity: identity,
+                credential: .claudeProfile(snapshotRef),
+                activateProfile: false
+            )
+        } catch {
+            addAccountError = error.localizedDescription
+            addAccountStatus = L10n.tr("Claude Profile 导入失败。")
+            database.appendLog(level: .error, message: L10n.tr("Claude Profile 导入失败：%@", error.localizedDescription))
+            try? await persistDatabase()
+        }
+
+        isAuthenticating = false
+    }
+
+    func switchToAccount(_ account: ManagedAccount) async {
         guard !isSwitchInProgress else { return }
         switchingAccountID = account.id
         verifyingSwitchAccountID = nil
@@ -673,8 +732,16 @@ final class AppViewModel: ObservableObject {
         pendingRestartPromptMessage = nil
 
         do {
-            let payload = try await latestPayloadForSwitch(for: account)
-            try authFileManager.activatePreservingFileIdentity(payload)
+            switch account.platform {
+            case .codex:
+                let payload = try await latestPayloadForSwitch(for: account)
+                try authFileManager.activatePreservingFileIdentity(payload)
+            case .claude:
+                let credential = try latestCredential(for: account)
+                if let snapshotRef = credential.claudeProfileSnapshotRef {
+                    try claudeProfileManager.activateProfile(snapshotRef)
+                }
+            }
             setActiveAccount(account.id)
             if account.platform == selectedPlatform {
                 selectedAccountID = account.id
@@ -682,8 +749,12 @@ final class AppViewModel: ObservableObject {
             database.appendLog(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
             try await persistDatabase()
             switchingAccountID = nil
-            verifyingSwitchAccountID = account.id
-            await verifySwitch(at: Date(), for: account.id)
+            if account.platform == .codex {
+                verifyingSwitchAccountID = account.id
+                await verifySwitch(at: Date(), for: account.id)
+            } else {
+                pushBanner(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
+            }
         } catch {
             switchingAccountID = nil
             verifyingSwitchAccountID = nil
@@ -725,9 +796,13 @@ final class AppViewModel: ObservableObject {
         }
 
         do {
+            let credential = try? credentialStore.load(for: accountID)
             try credentialStore.delete(for: accountID)
+            if case let .claudeProfile(snapshotRef)? = credential {
+                try claudeProfileManager.deleteProfile(snapshotRef)
+            }
             if account.isActive {
-                if clearCurrentAuth {
+                if clearCurrentAuth, account.platform == .codex {
                     try authFileManager.clearAuthFile()
                 }
                 setActiveAccount(nil)
@@ -736,7 +811,9 @@ final class AppViewModel: ObservableObject {
             syncSelectionForSelectedPlatform()
             database.appendLog(
                 level: .info,
-                message: clearCurrentAuth ? L10n.tr("已删除账号并清空当前 ~/.codex/auth.json。") : L10n.tr("已删除账号 %@。", account.displayName)
+                message: clearCurrentAuth && account.platform == .codex
+                    ? L10n.tr("已删除账号并清空当前 ~/.codex/auth.json。")
+                    : L10n.tr("已删除账号 %@。", account.displayName)
             )
             evaluateLowQuotaSwitchRecommendation()
             try await persistDatabase()
@@ -795,13 +872,14 @@ final class AppViewModel: ObservableObject {
         apiKeyDisplayName = ""
         addAccountError = nil
         addAccountPlatform = selectedPlatform
+        addAccountMode = AddAccountMode.modes(for: addAccountPlatform).first ?? .browser
         addAccountStatus = selectedPlatformAddAccountMessage
         isAuthenticating = false
     }
 
-    private func finalizeLogin(_ result: AuthLoginResult) async throws {
+    private func finalizeCodexLogin(_ result: AuthLoginResult) async throws {
         let account = upsertAccount(identity: result.identity, payload: result.payload, makeActive: false)
-        try credentialStore.save(result.payload, for: account.id)
+        try credentialStore.save(.codex(result.payload), for: account.id)
         try authFileManager.activatePreservingFileIdentity(result.payload)
         setActiveAccount(account.id)
         if account.platform == selectedPlatform {
@@ -813,11 +891,31 @@ final class AppViewModel: ObservableObject {
         dismissAddAccountSheet()
     }
 
+    private func finalizeClaudeLogin(
+        identity: AuthIdentity,
+        credential: StoredCredential,
+        activateProfile: Bool
+    ) async throws {
+        let account = upsertClaudeAccount(identity: identity, authKind: credential.authKind, makeActive: false)
+        try credentialStore.save(credential, for: account.id)
+        if activateProfile, let snapshotRef = credential.claudeProfileSnapshotRef {
+            try claudeProfileManager.activateProfile(snapshotRef)
+        }
+        setActiveAccount(account.id)
+        if account.platform == selectedPlatform {
+            selectedAccountID = account.id
+        }
+        database.appendLog(level: .info, message: L10n.tr("已登录并激活账号 %@。", account.displayName))
+        try await persistDatabase()
+        pushBanner(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
+        dismissAddAccountSheet()
+    }
+
     private func resolveIdentity(from payload: CodexAuthPayload, preferredDisplayName: String? = nil) throws -> AuthIdentity {
         switch payload.authMode {
         case .chatgpt:
             return try jwtDecoder.decodeIdentity(from: payload)
-        case .apiKey:
+        case .openAIAPIKey:
             let validatedPayload = try payload.validated()
             let suffix = String((validatedPayload.openAIAPIKey ?? "").suffix(6))
             let fallbackDisplayName = suffix.isEmpty ? L10n.tr("API Key") : L10n.tr("API Key • %@", suffix)
@@ -827,20 +925,54 @@ final class AppViewModel: ObservableObject {
                 email: validatedPayload.credentialSummary,
                 planType: nil
             )
+        case .claudeProfile, .anthropicAPIKey:
+            throw CodexAuthPayloadError.unsupportedAuthMode
         }
     }
 
+    private func resolveAnthropicIdentity(
+        from credential: AnthropicAPIKeyCredential,
+        preferredDisplayName: String? = nil
+    ) -> AuthIdentity {
+        let suffix = String(credential.apiKey.suffix(6))
+        let fallbackDisplayName = suffix.isEmpty
+            ? L10n.tr("Anthropic API Key")
+            : L10n.tr("Anthropic API Key • %@", suffix)
+        return AuthIdentity(
+            accountID: credential.accountIdentifier,
+            displayName: preferredDisplayName ?? fallbackDisplayName,
+            email: credential.credentialSummary,
+            planType: nil
+        )
+    }
+
+    private func resolveClaudeProfileIdentity(
+        from snapshotRef: ClaudeProfileSnapshotRef,
+        preferredDisplayName: String? = nil
+    ) -> AuthIdentity {
+        let suffix = String(snapshotRef.snapshotID.prefix(6))
+        let fallbackDisplayName = suffix.isEmpty
+            ? L10n.tr("Claude Profile")
+            : L10n.tr("Claude Profile • %@", suffix)
+        return AuthIdentity(
+            accountID: "claude_profile_\(snapshotRef.snapshotID)",
+            displayName: preferredDisplayName ?? fallbackDisplayName,
+            email: nil,
+            planType: nil
+        )
+    }
+
     private func upsertAccount(identity: AuthIdentity, payload: CodexAuthPayload, makeActive: Bool) -> ManagedAccount {
-        let existing = database.accounts.first(where: { $0.platform == .codex && $0.codexAccountID == identity.accountID })
+        let existing = database.accounts.first(where: { $0.platform == .codex && $0.accountIdentifier == identity.accountID })
         let refreshDate = CodexDateCoding.parse(payload.lastRefresh)
 
         let account = ManagedAccount(
             id: existing?.id ?? UUID(),
             platform: .codex,
-            codexAccountID: identity.accountID,
+            accountIdentifier: identity.accountID,
             displayName: existing?.displayName ?? identity.displayName,
             email: identity.email ?? existing?.email,
-            authMode: payload.authMode,
+            authKind: payload.authMode,
             createdAt: existing?.createdAt ?? Date(),
             lastUsedAt: existing?.lastUsedAt,
             lastQuotaSnapshotAt: existing?.lastQuotaSnapshotAt,
@@ -856,16 +988,50 @@ final class AppViewModel: ObservableObject {
         return account
     }
 
+    private func syncCurrentCodexAccount(
+        identity: AuthIdentity,
+        payload: CodexAuthPayload,
+        makeActive: Bool
+    ) throws -> ManagedAccount {
+        let account = upsertAccount(identity: identity, payload: payload, makeActive: makeActive)
+        try credentialStore.save(.codex(payload), for: account.id)
+
+        if database.snapshot(for: account.id) == nil, let snapshot = quotaMonitor.bootstrapSnapshot() {
+            database.updateSnapshot(snapshot, for: account.id)
+            evaluateLowQuotaSwitchRecommendation()
+        }
+
+        return account
+    }
+
+    private func upsertClaudeAccount(identity: AuthIdentity, authKind: ManagedAuthKind, makeActive: Bool) -> ManagedAccount {
+        let existing = database.accounts.first(where: { $0.platform == .claude && $0.accountIdentifier == identity.accountID })
+
+        let account = ManagedAccount(
+            id: existing?.id ?? UUID(),
+            platform: .claude,
+            accountIdentifier: identity.accountID,
+            displayName: existing?.displayName ?? identity.displayName,
+            email: identity.email ?? existing?.email,
+            authKind: authKind,
+            createdAt: existing?.createdAt ?? Date(),
+            lastUsedAt: existing?.lastUsedAt,
+            lastQuotaSnapshotAt: existing?.lastQuotaSnapshotAt,
+            lastRefreshAt: existing?.lastRefreshAt,
+            planType: identity.planType ?? existing?.planType,
+            subscriptionDetails: nil,
+            lastStatusCheckAt: existing?.lastStatusCheckAt,
+            lastStatusMessage: existing?.lastStatusMessage,
+            lastStatusLevel: existing?.lastStatusLevel,
+            isActive: makeActive
+        )
+        database.upsert(account: account)
+        return account
+    }
+
     @discardableResult
     private func refreshAccountStatus(accountID: UUID, showBanner: Bool) async -> AccountStatusRefreshOutcome {
         guard !refreshingAccountIDs.contains(accountID), let currentAccount = database.account(id: accountID) else {
-            return .failure
-        }
-        guard currentAccount.platform == .codex else {
-            let message = unsupportedMessage(for: currentAccount.platform)
-            if showBanner {
-                banner = BannerState(level: .warning, message: message)
-            }
             return .failure
         }
 
@@ -875,102 +1041,21 @@ final class AppViewModel: ObservableObject {
         let startedAt = Date()
 
         do {
-            let sourcePayload = try latestPayloadForRefresh(for: currentAccount)
-            if sourcePayload.authMode == .apiKey {
-                let isActive = database.account(id: accountID)?.isActive ?? currentAccount.isActive
-
-                if isActive {
-                    try authFileManager.activatePreservingFileIdentity(sourcePayload)
-                }
-
-                let statusMessage = isActive
-                    ? L10n.tr("API Key 模式不支持在线额度同步，已同步当前 ~/.codex/auth.json。")
-                    : L10n.tr("API Key 模式不支持在线额度同步，本地凭据可用。")
-                let logMessage = isActive
-                    ? L10n.tr("已确认 API Key 账号 %@ 可用，并同步当前 ~/.codex/auth.json。", currentAccount.displayName)
-                    : L10n.tr("已确认 API Key 账号 %@ 的本地凭据可用。", currentAccount.displayName)
-
-                updateStatusMetadata(
-                    for: accountID,
-                    level: .info,
-                    message: statusMessage,
-                    checkedAt: Date(),
-                    planType: currentAccount.planType
+            switch currentAccount.platform {
+            case .codex:
+                return try await refreshCodexAccountStatus(
+                    currentAccount,
+                    accountID: accountID,
+                    showBanner: showBanner,
+                    startedAt: startedAt
                 )
-
-                if showBanner {
-                    banner = BannerState(level: .info, message: logMessage)
-                }
-                database.appendLog(level: .info, message: logMessage)
-                try await persistDatabase()
-                return .success
-            }
-
-            let result = try await oauthClient.refreshAuth(using: sourcePayload)
-            try credentialStore.save(result.payload, for: accountID)
-
-            let isActive = database.account(id: accountID)?.isActive ?? currentAccount.isActive
-            if isActive {
-                try authFileManager.activatePreservingFileIdentity(result.payload)
-            }
-
-            let refreshedAccount = upsertAccount(identity: result.identity, payload: result.payload, makeActive: isActive)
-            var outcome: AccountStatusRefreshOutcome = .success
-            var bannerLevel: SwitchLogLevel = .info
-            var statusMessage = isActive ? L10n.tr("状态已更新，并同步了当前 ~/.codex/auth.json。") : L10n.tr("状态已更新，账号凭据可用。")
-            var logMessage = L10n.tr("已手动更新账号 %@ 的状态。", refreshedAccount.displayName)
-
-            do {
-                let usage = try await oauthClient.fetchUsageSnapshot(using: result.payload)
-                database.updateSnapshot(usage.snapshot, for: refreshedAccount.id)
-                evaluateLowQuotaSwitchRecommendation()
-                updateAccountContactMetadata(for: refreshedAccount.id, email: usage.email, planType: usage.planType)
-                updateSubscriptionMetadata(for: refreshedAccount.id, details: usage.subscriptionDetails)
-
-                let quotaSummary = usage.snapshot.remainingSummary
-                if usage.limitReached || !usage.allowed {
-                    statusMessage = L10n.tr("状态与额度已更新：剩余 %@，当前已触达额度限制。", quotaSummary)
-                } else {
-                    statusMessage = L10n.tr("状态与额度已更新：剩余 %@。", quotaSummary)
-                }
-                logMessage = L10n.tr("已手动更新账号 %@ 的状态与额度。", refreshedAccount.displayName)
-                updateStatusMetadata(
-                    for: refreshedAccount.id,
-                    level: .info,
-                    message: statusMessage,
-                    checkedAt: Date(),
-                    planType: usage.planType ?? result.identity.planType
+            case .claude:
+                return try await refreshClaudeAccountStatus(
+                    currentAccount,
+                    accountID: accountID,
+                    showBanner: showBanner
                 )
-            } catch {
-                outcome = .partial
-                bannerLevel = .warning
-                statusMessage = L10n.tr("状态已更新，但额度同步失败：%@", error.localizedDescription)
-                logMessage = L10n.tr("已手动更新账号 %@ 的状态，但额度同步失败。", refreshedAccount.displayName)
-                updateStatusMetadata(
-                    for: refreshedAccount.id,
-                    level: .warning,
-                    message: statusMessage,
-                    checkedAt: Date(),
-                    planType: result.identity.planType
-                )
-
-                if database.snapshot(for: refreshedAccount.id) == nil, let snapshot = quotaMonitor.bootstrapSnapshot() {
-                    database.updateSnapshot(snapshot, for: refreshedAccount.id)
-                    evaluateLowQuotaSwitchRecommendation()
-                }
             }
-
-            if showBanner {
-                banner = BannerState(level: bannerLevel, message: logMessage)
-            }
-            database.appendLog(level: bannerLevel, message: logMessage)
-            try await persistDatabase()
-
-            if isActive {
-                verifyingSwitchAccountID = accountID
-                await verifySwitch(at: startedAt, for: accountID)
-            }
-            return outcome
         } catch {
             let message = L10n.tr("状态更新失败：%@", error.localizedDescription)
             updateStatusMetadata(for: accountID, level: .warning, message: message, checkedAt: Date(), planType: nil)
@@ -983,20 +1068,170 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func latestPayloadForRefresh(for account: ManagedAccount) throws -> CodexAuthPayload {
+    private func refreshCodexAccountStatus(
+        _ currentAccount: ManagedAccount,
+        accountID: UUID,
+        showBanner: Bool,
+        startedAt: Date
+    ) async throws -> AccountStatusRefreshOutcome {
+        let sourcePayload = try latestCodexPayloadForRefresh(for: currentAccount)
+        if sourcePayload.authMode == .openAIAPIKey {
+            let isActive = database.account(id: accountID)?.isActive ?? currentAccount.isActive
+
+            if isActive {
+                try authFileManager.activatePreservingFileIdentity(sourcePayload)
+            }
+
+            let statusMessage = isActive
+                ? L10n.tr("API Key 模式不支持在线额度同步，已同步当前 ~/.codex/auth.json。")
+                : L10n.tr("API Key 模式不支持在线额度同步，本地凭据可用。")
+            let logMessage = isActive
+                ? L10n.tr("已确认 API Key 账号 %@ 可用，并同步当前 ~/.codex/auth.json。", currentAccount.displayName)
+                : L10n.tr("已确认 API Key 账号 %@ 的本地凭据可用。", currentAccount.displayName)
+
+            updateStatusMetadata(
+                for: accountID,
+                level: .info,
+                message: statusMessage,
+                checkedAt: Date(),
+                planType: currentAccount.planType
+            )
+
+            if showBanner {
+                banner = BannerState(level: .info, message: logMessage)
+            }
+            database.appendLog(level: .info, message: logMessage)
+            try await persistDatabase()
+            return .success
+        }
+
+        let result = try await oauthClient.refreshAuth(using: sourcePayload)
+        try credentialStore.save(.codex(result.payload), for: accountID)
+
+        let isActive = database.account(id: accountID)?.isActive ?? currentAccount.isActive
+        if isActive {
+            try authFileManager.activatePreservingFileIdentity(result.payload)
+        }
+
+        let refreshedAccount = upsertAccount(identity: result.identity, payload: result.payload, makeActive: isActive)
+        var outcome: AccountStatusRefreshOutcome = .success
+        var bannerLevel: SwitchLogLevel = .info
+        var statusMessage = isActive ? L10n.tr("状态已更新，并同步了当前 ~/.codex/auth.json。") : L10n.tr("状态已更新，账号凭据可用。")
+        var logMessage = L10n.tr("已手动更新账号 %@ 的状态。", refreshedAccount.displayName)
+
+        do {
+            let usage = try await oauthClient.fetchUsageSnapshot(using: result.payload)
+            database.updateSnapshot(usage.snapshot, for: refreshedAccount.id)
+            evaluateLowQuotaSwitchRecommendation()
+            updateAccountContactMetadata(for: refreshedAccount.id, email: usage.email, planType: usage.planType)
+            updateSubscriptionMetadata(for: refreshedAccount.id, details: usage.subscriptionDetails)
+
+            let quotaSummary = usage.snapshot.remainingSummary
+            if usage.limitReached || !usage.allowed {
+                statusMessage = L10n.tr("状态与额度已更新：剩余 %@，当前已触达额度限制。", quotaSummary)
+            } else {
+                statusMessage = L10n.tr("状态与额度已更新：剩余 %@。", quotaSummary)
+            }
+            logMessage = L10n.tr("已手动更新账号 %@ 的状态与额度。", refreshedAccount.displayName)
+            updateStatusMetadata(
+                for: refreshedAccount.id,
+                level: .info,
+                message: statusMessage,
+                checkedAt: Date(),
+                planType: usage.planType ?? result.identity.planType
+            )
+        } catch {
+            outcome = .partial
+            bannerLevel = .warning
+            statusMessage = L10n.tr("状态已更新，但额度同步失败：%@", error.localizedDescription)
+            logMessage = L10n.tr("已手动更新账号 %@ 的状态，但额度同步失败。", refreshedAccount.displayName)
+            updateStatusMetadata(
+                for: refreshedAccount.id,
+                level: .warning,
+                message: statusMessage,
+                checkedAt: Date(),
+                planType: result.identity.planType
+            )
+
+            if database.snapshot(for: refreshedAccount.id) == nil, let snapshot = quotaMonitor.bootstrapSnapshot() {
+                database.updateSnapshot(snapshot, for: refreshedAccount.id)
+                evaluateLowQuotaSwitchRecommendation()
+            }
+        }
+
+        if showBanner {
+            banner = BannerState(level: bannerLevel, message: logMessage)
+        }
+        database.appendLog(level: bannerLevel, message: logMessage)
+        try await persistDatabase()
+
+        if isActive {
+            verifyingSwitchAccountID = accountID
+            await verifySwitch(at: startedAt, for: accountID)
+        }
+        return outcome
+    }
+
+    private func refreshClaudeAccountStatus(
+        _ currentAccount: ManagedAccount,
+        accountID: UUID,
+        showBanner: Bool
+    ) async throws -> AccountStatusRefreshOutcome {
+        let credential = try latestCredential(for: currentAccount)
+
+        switch credential {
+        case let .anthropicAPIKey(apiKeyCredential):
+            let snapshot = try await claudeAPIClient.probeStatus(using: apiKeyCredential)
+            database.updateClaudeRateLimitSnapshot(snapshot, for: accountID)
+            let message = L10n.tr("Anthropic API Key 已刷新：请求剩余 %@。", claudeRequestsRemainingText(snapshot.requests.remaining))
+            updateStatusMetadata(
+                for: accountID,
+                level: .info,
+                message: message,
+                checkedAt: snapshot.capturedAt,
+                planType: currentAccount.planType
+            )
+            if showBanner {
+                banner = BannerState(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
+            }
+            database.appendLog(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
+            try await persistDatabase()
+            return .success
+        case .claudeProfile:
+            let message = L10n.tr("这是本地 Claude Profile；应用不会在线刷新 claude.ai 登录态，可直接从应用启动 Claude CLI 验证。")
+            updateStatusMetadata(for: accountID, level: .info, message: message, checkedAt: Date(), planType: currentAccount.planType)
+            if showBanner {
+                banner = BannerState(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
+            }
+            database.appendLog(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
+            try await persistDatabase()
+            return .success
+        case .codex:
+            throw CredentialStoreError.unexpectedData
+        }
+    }
+
+    private func latestCredential(for account: ManagedAccount) throws -> StoredCredential {
         try credentialStore.loadLatest(for: account, authFileManager: authFileManager)
     }
 
-    private func latestPayloadForSwitch(for account: ManagedAccount) async throws -> CodexAuthPayload {
-        let cachedPayload = try latestPayloadForRefresh(for: account)
+    private func latestCodexPayloadForRefresh(for account: ManagedAccount) throws -> CodexAuthPayload {
+        guard let payload = try latestCredential(for: account).codexPayload else {
+            throw CredentialStoreError.unexpectedData
+        }
+        return payload
+    }
 
-        if cachedPayload.authMode == .apiKey {
+    private func latestPayloadForSwitch(for account: ManagedAccount) async throws -> CodexAuthPayload {
+        let cachedPayload = try latestCodexPayloadForRefresh(for: account)
+
+        if cachedPayload.authMode == .openAIAPIKey {
             return cachedPayload
         }
 
         do {
             let refreshed = try await oauthClient.refreshAuth(using: cachedPayload)
-            try credentialStore.save(refreshed.payload, for: account.id)
+            try credentialStore.save(.codex(refreshed.payload), for: account.id)
             _ = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: account.isActive)
             database.appendLog(level: .info, message: L10n.tr("切换前已在线刷新账号 %@ 的凭据。", account.displayName))
             return refreshed.payload
@@ -1004,6 +1239,72 @@ final class AppViewModel: ObservableObject {
             database.appendLog(level: .warning, message: L10n.tr("切换前在线刷新账号 %@ 失败，已回退本地缓存凭据：%@", account.displayName, error.localizedDescription))
             return cachedPayload
         }
+    }
+
+    private func openCodexCLIImpl(for account: ManagedAccount, workingDirectoryURL: URL) async throws {
+        if account.isActive {
+            try codexCLILauncher.launchCLI(
+                for: account,
+                mode: .globalCurrentAuth,
+                workingDirectoryURL: workingDirectoryURL,
+                appSupportDirectoryURL: paths.appSupportDirectoryURL
+            )
+            return
+        }
+
+        let cachedPayload = try latestCodexPayloadForRefresh(for: account)
+        var payload = cachedPayload
+
+        if payload.authMode == .chatgpt {
+            do {
+                let refreshed = try await oauthClient.refreshAuth(using: payload)
+                payload = refreshed.payload
+                try credentialStore.save(.codex(refreshed.payload), for: account.id)
+                let refreshedAccount = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: false)
+                database.appendLog(level: .info, message: L10n.tr("打开 CLI 前已在线刷新账号 %@ 的凭据。", refreshedAccount.displayName))
+                try? await persistDatabase()
+            } catch {
+                database.appendLog(level: .warning, message: L10n.tr("打开 CLI 前在线刷新账号 %@ 失败，已回退当前本地凭据：%@", account.displayName, error.localizedDescription))
+                try? await persistDatabase()
+            }
+        }
+
+        try codexCLILauncher.launchCLI(
+            for: account,
+            mode: .isolatedAccount(payload: payload),
+            workingDirectoryURL: workingDirectoryURL,
+            appSupportDirectoryURL: paths.appSupportDirectoryURL
+        )
+    }
+
+    private func openClaudeCLIImpl(for account: ManagedAccount, workingDirectoryURL: URL) async throws {
+        let credential = try latestCredential(for: account)
+
+        switch credential {
+        case let .claudeProfile(snapshotRef):
+            let mode: ClaudeCLILaunchMode
+            if account.isActive {
+                mode = .globalProfile
+            } else {
+                let rootURL = try claudeProfileManager.prepareIsolatedProfileRoot(for: account.id, snapshotRef: snapshotRef)
+                mode = .isolatedProfile(rootURL: rootURL)
+            }
+            try claudeCLILauncher.launchCLI(for: account, mode: mode, workingDirectoryURL: workingDirectoryURL)
+        case let .anthropicAPIKey(apiKeyCredential):
+            let rootURL = try claudeProfileManager.prepareIsolatedAPIKeyRoot(for: account.id)
+            try claudeCLILauncher.launchCLI(
+                for: account,
+                mode: .anthropicAPIKey(rootURL: rootURL, credential: apiKeyCredential),
+                workingDirectoryURL: workingDirectoryURL
+            )
+        case .codex:
+            throw CredentialStoreError.unexpectedData
+        }
+    }
+
+    private func claudeRequestsRemainingText(_ value: Int?) -> String {
+        guard let value else { return L10n.tr("未知") }
+        return "\(value)"
     }
 
     private func updateStatusMetadata(
@@ -1131,7 +1432,8 @@ final class AppViewModel: ObservableObject {
     }
 
     private func startQuotaMonitor() {
-        quotaMonitor.setActiveAccountID(database.activeAccountID)
+        let activeCodexAccountID = database.account(id: database.activeAccountID)?.platform == .codex ? database.activeAccountID : nil
+        quotaMonitor.setActiveAccountID(activeCodexAccountID)
         quotaMonitor.start(
             onSnapshot: { [weak self] accountID, snapshot in
                 Task { @MainActor [weak self] in
@@ -1154,7 +1456,8 @@ final class AppViewModel: ObservableObject {
 
     private func setActiveAccount(_ accountID: UUID?) {
         database.setActiveAccount(accountID)
-        quotaMonitor.setActiveAccountID(accountID)
+        let activeCodexAccountID = database.account(id: accountID)?.platform == .codex ? accountID : nil
+        quotaMonitor.setActiveAccountID(activeCodexAccountID)
         if accountID == nil {
             lowQuotaSwitchRecommendation = nil
             dismissedLowQuotaRecommendationKey = nil
@@ -1173,7 +1476,7 @@ final class AppViewModel: ObservableObject {
             do {
                 let result = try await self.oauthClient.completeBrowserLogin(session: session)
                 self.addAccountStatus = L10n.tr("浏览器回调已收到，正在完成登录。")
-                try await self.finalizeLogin(result)
+                try await self.finalizeCodexLogin(result)
             } catch {
                 guard !Task.isCancelled else { return }
                 self.addAccountError = error.localizedDescription
@@ -1201,7 +1504,8 @@ final class AppViewModel: ObservableObject {
     }
 
     private func evaluateLowQuotaSwitchRecommendation() {
-        guard let activeAccount = activeAccount,
+        guard let activeAccount = database.account(id: database.activeAccountID),
+              activeAccount.platform == .codex,
               let activeSnapshot = database.snapshot(for: activeAccount.id),
               activeSnapshot.primary.remainingPercent <= 10
         else {
@@ -1281,16 +1585,22 @@ final class AppViewModel: ObservableObject {
         case .codex:
             return ""
         case .claude:
-            return L10n.tr("Claude 平台框架已预留；本轮仅展示入口，账号接入、切换、CLI 启动和额度同步将在后续变更中实现。")
+            return L10n.tr("Claude 当前支持本地 Profile 导入、Anthropic API Key 管理和 Claude CLI 启动；不支持 claude.ai OAuth 切换。")
         }
     }
 
-    private func addAccountMessage(for platform: PlatformKind) -> String {
-        switch platform {
-        case .codex:
+    private func addAccountMessage(for platform: PlatformKind, mode: AddAccountMode) -> String {
+        switch (platform, mode) {
+        case (.codex, .browser):
             return L10n.tr("选择浏览器登录或 API Key 接入方式。")
-        case .claude:
-            return L10n.tr("Claude 入口已预留，但本轮不接入真实账号登录。")
+        case (.codex, .openAIAPIKey):
+            return L10n.tr("将 API Key 写入 `~/.codex/auth.json` 并缓存到本地账号库，后续可以像其它账号一样切换。")
+        case (.claude, .claudeProfile):
+            return L10n.tr("导入当前 `~/.claude` 与 `~/.claude.json`，保存为可切换的本地 Claude Profile。")
+        case (.claude, .anthropicAPIKey):
+            return L10n.tr("保存 Anthropic API Key。切换后仅影响应用内当前账号与从应用启动的 Claude CLI。")
+        default:
+            return L10n.tr("选择浏览器登录或 API Key 接入方式。")
         }
     }
 

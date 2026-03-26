@@ -25,6 +25,15 @@ struct PlatformCapabilities: Equatable, Sendable {
         supportsQuotaMonitoring: false,
         supportsRuntimeInspection: false
     )
+
+    static let claude = PlatformCapabilities(
+        supportsAccountAddition: true,
+        supportsStatusRefresh: true,
+        supportsCLILaunch: true,
+        supportsDesktopLaunch: false,
+        supportsQuotaMonitoring: false,
+        supportsRuntimeInspection: false
+    )
 }
 
 protocol PlatformRuntime: Sendable {
@@ -42,5 +51,5 @@ struct CodexPlatformRuntime: PlatformRuntime {
 struct ClaudePlatformRuntime: PlatformRuntime {
     let platform: PlatformKind = .claude
     let displayName = "Claude"
-    let capabilities = PlatformCapabilities.placeholder
+    let capabilities = PlatformCapabilities.claude
 }

@@ -23,23 +23,22 @@ struct AddAccountSheet: View {
             }
             .pickerStyle(.segmented)
             .onChange(of: model.addAccountPlatform) { _, platform in
-                if platform == .codex, !AddAccountMode.allCases.contains(model.addAccountMode) {
-                    model.addAccountMode = .browser
-                }
+                model.addAccountMode = AddAccountMode.modes(for: platform).first ?? .browser
                 model.addAccountError = nil
                 model.addAccountStatus = model.selectedPlatformAddAccountMessage
             }
             .onAppear {
                 model.addAccountPlatform = model.selectedPlatform
+                model.addAccountMode = AddAccountMode.modes(for: model.selectedPlatform).first ?? .browser
                 model.addAccountStatus = model.selectedPlatformAddAccountMessage
             }
 
             Text(model.addAccountStatus)
                 .foregroundStyle(.secondary)
 
-            if model.addAccountPlatform == .codex {
+            if model.availableAddAccountModes.count > 1 {
                 Picker(L10n.tr("登录方式"), selection: $model.addAccountMode) {
-                    ForEach(AddAccountMode.allCases) { mode in
+                    ForEach(model.availableAddAccountModes) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
@@ -76,7 +75,7 @@ struct AddAccountSheet: View {
                 .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            if model.addAccountPlatform == .codex, model.addAccountMode == .apiKey {
+            if model.addAccountPlatform == .codex, model.addAccountMode == .openAIAPIKey {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L10n.tr("API Key 接入"))
                         .font(.headline)
@@ -99,11 +98,41 @@ struct AddAccountSheet: View {
                 .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            if model.addAccountPlatform == .claude {
+            if model.addAccountPlatform == .claude, model.addAccountMode == .claudeProfile {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(L10n.tr("Claude 即将支持"))
+                    Text(L10n.tr("导入当前 Claude Profile"))
                         .font(.headline)
-                    Text(L10n.tr("Claude 平台框架已预留；本轮仅展示入口，不接入真实账号登录、切换或 CLI 启动。"))
+                    Text(L10n.tr("导入当前 `~/.claude` 与 `~/.claude.json`，保存为可切换的本地 Claude Profile。"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    TextField(L10n.tr("显示名称（可选）"), text: $model.apiKeyDisplayName)
+                        .textFieldStyle(.roundedBorder)
+
+                    Text(L10n.tr("这只会保存本地配置快照，不代表 claude.ai 或 Console 的官方登录态。"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+
+            if model.addAccountPlatform == .claude, model.addAccountMode == .anthropicAPIKey {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L10n.tr("Anthropic API Key"))
+                        .font(.headline)
+                    Text(L10n.tr("保存 Anthropic API Key。切换后仅影响应用内当前账号与从应用启动的 Claude CLI。"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    TextField(L10n.tr("显示名称（可选）"), text: $model.apiKeyDisplayName)
+                        .textFieldStyle(.roundedBorder)
+
+                    SecureField(L10n.tr("输入 ANTHROPIC_API_KEY"), text: $model.apiKeyInput)
+                        .textFieldStyle(.roundedBorder)
+
+                    Text(L10n.tr("手动更新状态时会向 Anthropic 发起极小探测请求，以读取限额响应头。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -125,22 +154,27 @@ struct AddAccountSheet: View {
                     dismiss()
                 }
                 Spacer()
-                Button(
-                    model.addAccountPlatform == .claude
-                        ? L10n.tr("Claude 即将支持")
-                        : (model.addAccountMode == .browser ? L10n.tr("开始浏览器登录") : L10n.tr("保存并激活 API Key"))
-                ) {
+                Button(actionButtonTitle) {
                     Task {
                         switch model.addAccountPlatform {
                         case .codex:
                             switch model.addAccountMode {
                             case .browser:
                                 await model.startBrowserLogin()
-                            case .apiKey:
+                            case .openAIAPIKey:
                                 await model.startAPIKeyLogin()
+                            case .claudeProfile, .anthropicAPIKey:
+                                break
                             }
                         case .claude:
-                            break
+                            switch model.addAccountMode {
+                            case .claudeProfile:
+                                await model.importClaudeProfile()
+                            case .anthropicAPIKey:
+                                await model.startAPIKeyLogin()
+                            case .browser, .openAIAPIKey:
+                                break
+                            }
                         }
                     }
                 }
@@ -149,5 +183,20 @@ struct AddAccountSheet: View {
             }
         }
         .padding(24)
+    }
+
+    private var actionButtonTitle: String {
+        switch (model.addAccountPlatform, model.addAccountMode) {
+        case (.codex, .browser):
+            return L10n.tr("开始浏览器登录")
+        case (.codex, .openAIAPIKey):
+            return L10n.tr("保存并激活 API Key")
+        case (.claude, .claudeProfile):
+            return L10n.tr("导入并激活 Claude Profile")
+        case (.claude, .anthropicAPIKey):
+            return L10n.tr("保存并激活 Anthropic API Key")
+        default:
+            return L10n.tr("新增账号")
+        }
     }
 }

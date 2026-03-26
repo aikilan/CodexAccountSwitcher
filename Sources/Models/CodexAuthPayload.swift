@@ -1,19 +1,5 @@
 import Foundation
 
-enum CodexAuthMode: String, Codable, CaseIterable, Sendable {
-    case chatgpt
-    case apiKey = "api_key"
-
-    var displayName: String {
-        switch self {
-        case .chatgpt:
-            return "ChatGPT"
-        case .apiKey:
-            return L10n.tr("API Key")
-        }
-    }
-}
-
 struct CodexTokenBundle: Codable, Equatable, Sendable {
     let idToken: String
     let accessToken: String
@@ -35,7 +21,7 @@ struct CodexTokenBundle: Codable, Equatable, Sendable {
 }
 
 struct CodexAuthPayload: Codable, Equatable, Sendable {
-    let authMode: CodexAuthMode
+    let authMode: ManagedAuthKind
     let openAIAPIKey: String?
     let tokens: CodexTokenBundle
     let lastRefresh: String
@@ -48,7 +34,7 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
     }
 
     init(
-        authMode: CodexAuthMode = .chatgpt,
+        authMode: ManagedAuthKind = .chatgpt,
         openAIAPIKey: String? = nil,
         tokens: CodexTokenBundle = .empty,
         lastRefresh: String = ""
@@ -64,8 +50,8 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
         let openAIAPIKey = try container.decodeIfPresent(String.self, forKey: .openAIAPIKey)
         let tokens = try container.decodeIfPresent(CodexTokenBundle.self, forKey: .tokens) ?? .empty
         let lastRefresh = try container.decodeIfPresent(String.self, forKey: .lastRefresh) ?? ""
-        let authMode = try container.decodeIfPresent(CodexAuthMode.self, forKey: .authMode)
-            ?? ((openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false && tokens.isEmpty) ? .apiKey : .chatgpt)
+        let authMode = try container.decodeIfPresent(ManagedAuthKind.self, forKey: .authMode)
+            ?? ((openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false && tokens.isEmpty) ? .openAIAPIKey : .chatgpt)
 
         self.init(authMode: authMode, openAIAPIKey: openAIAPIKey, tokens: tokens, lastRefresh: lastRefresh)
     }
@@ -78,8 +64,10 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
             try container.encode(authMode, forKey: .authMode)
             try container.encode(tokens, forKey: .tokens)
             try container.encode(lastRefresh, forKey: .lastRefresh)
-        case .apiKey:
+        case .openAIAPIKey:
             try container.encodeIfPresent(openAIAPIKey, forKey: .openAIAPIKey)
+        case .claudeProfile, .anthropicAPIKey:
+            throw CodexAuthPayloadError.unsupportedAuthMode
         }
     }
 
@@ -95,11 +83,13 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
             guard CodexDateCoding.parse(lastRefresh) != nil else {
                 throw CodexAuthPayloadError.invalidRefreshTimestamp
             }
-        case .apiKey:
+        case .openAIAPIKey:
             guard let trimmedAPIKey = openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedAPIKey.isEmpty else {
                 throw CodexAuthPayloadError.missingAPIKey
             }
-            return CodexAuthPayload(authMode: .apiKey, openAIAPIKey: trimmedAPIKey)
+            return CodexAuthPayload(authMode: .openAIAPIKey, openAIAPIKey: trimmedAPIKey)
+        case .claudeProfile, .anthropicAPIKey:
+            throw CodexAuthPayloadError.unsupportedAuthMode
         }
         return self
     }
@@ -108,13 +98,15 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
         switch authMode {
         case .chatgpt:
             return tokens.accountID
-        case .apiKey:
+        case .openAIAPIKey:
             return Self.apiKeyAccountIdentifier(for: openAIAPIKey ?? "")
+        case .claudeProfile, .anthropicAPIKey:
+            return ""
         }
     }
 
     var credentialSummary: String? {
-        guard authMode == .apiKey, let openAIAPIKey, !openAIAPIKey.isEmpty else { return nil }
+        guard authMode == .openAIAPIKey, let openAIAPIKey, !openAIAPIKey.isEmpty else { return nil }
         let tail = String(openAIAPIKey.suffix(6))
         return tail.isEmpty ? L10n.tr("API Key") : "sk-...\(tail)"
     }

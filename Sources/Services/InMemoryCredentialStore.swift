@@ -1,24 +1,24 @@
 import Foundation
 
 final class InMemoryCredentialStore: CredentialStore, AccountCredentialStore {
-    private var storage: [UUID: CodexAuthPayload] = [:]
+    private var storage: [UUID: StoredCredential] = [:]
     private let lock = NSLock()
 
     func preload() throws {}
 
-    func save(_ payload: CodexAuthPayload, for accountID: UUID) throws {
+    func save(_ credential: StoredCredential, for accountID: UUID) throws {
         lock.lock()
         defer { lock.unlock() }
-        storage[accountID] = payload
+        storage[accountID] = credential
     }
 
-    func load(for accountID: UUID) throws -> CodexAuthPayload {
+    func load(for accountID: UUID) throws -> StoredCredential {
         lock.lock()
         defer { lock.unlock() }
-        guard let payload = storage[accountID] else {
+        guard let credential = storage[accountID] else {
             throw CredentialStoreError.itemNotFound
         }
-        return payload
+        return credential
     }
 
     func delete(for accountID: UUID) throws {
@@ -27,13 +27,14 @@ final class InMemoryCredentialStore: CredentialStore, AccountCredentialStore {
         storage.removeValue(forKey: accountID)
     }
 
-    func loadLatest(for account: ManagedAccount, authFileManager: any AuthFileManaging) throws -> CodexAuthPayload {
+    func loadLatest(for account: ManagedAccount, authFileManager: any AuthFileManaging) throws -> StoredCredential {
         if account.isActive,
            let payload = try? authFileManager.readCurrentAuth(),
-           payload.accountIdentifier == account.codexAccountID
+           payload.accountIdentifier == account.accountIdentifier
         {
-            try save(payload, for: account.id)
-            return payload
+            let credential = StoredCredential.codex(payload)
+            try save(credential, for: account.id)
+            return credential
         }
 
         return try load(for: account.id)

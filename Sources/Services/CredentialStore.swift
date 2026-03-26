@@ -1,8 +1,8 @@
 import Foundation
 
 protocol CredentialStore {
-    func save(_ payload: CodexAuthPayload, for accountID: UUID) throws
-    func load(for accountID: UUID) throws -> CodexAuthPayload
+    func save(_ credential: StoredCredential, for accountID: UUID) throws
+    func load(for accountID: UUID) throws -> StoredCredential
     func delete(for accountID: UUID) throws
 }
 

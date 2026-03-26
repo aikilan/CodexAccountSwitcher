@@ -4,6 +4,7 @@ struct PlatformPaths: Sendable {
     let platform: PlatformKind
     let homeURL: URL
     let authFileURL: URL?
+    let userSettingsFileURL: URL?
     let sessionsDirectoryURL: URL?
     let stateDatabaseURL: URL?
 }
@@ -39,6 +40,7 @@ struct AppPaths: Sendable {
             platform: .codex,
             homeURL: codexHome,
             authFileURL: codexHome.appendingPathComponent("auth.json"),
+            userSettingsFileURL: nil,
             sessionsDirectoryURL: codexHome.appendingPathComponent("sessions", isDirectory: true),
             stateDatabaseURL: codexHome.appendingPathComponent("state_5.sqlite")
         )
@@ -46,6 +48,7 @@ struct AppPaths: Sendable {
             platform: .claude,
             homeURL: claudeHome,
             authFileURL: nil,
+            userSettingsFileURL: claudeHome.deletingLastPathComponent().appendingPathComponent(".claude.json"),
             sessionsDirectoryURL: nil,
             stateDatabaseURL: nil
         )

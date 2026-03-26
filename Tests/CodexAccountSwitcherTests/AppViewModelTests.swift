@@ -180,6 +180,202 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.selectedAccount?.codexAccountID, "acct_actual")
     }
 
+    func testPreparePassivelyImportsCurrentCodexAuthWhenClaudeIsActive() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let codexHome = root.appendingPathComponent("codex-home", isDirectory: true)
+        let claudeHome = root.appendingPathComponent("claude-home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+        try fileManager.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: claudeHome, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let paths = try AppPaths(
+            fileManager: fileManager,
+            codexHomeOverride: codexHome,
+            claudeHomeOverride: claudeHome,
+            appSupportOverride: appSupport
+        )
+        let databaseStore = AppDatabaseStore(databaseURL: paths.databaseURL)
+        let credentialStore = InMemoryCredentialStore()
+        let claudeAccountID = UUID()
+        let claudeCredential = StoredCredential.claudeProfile(ClaudeProfileSnapshotRef(snapshotID: "snapshot_prepare"))
+        try credentialStore.save(claudeCredential, for: claudeAccountID)
+
+        let claudeAccount = ManagedAccount(
+            id: claudeAccountID,
+            platform: .claude,
+            codexAccountID: claudeCredential.accountIdentifier,
+            displayName: "Claude Profile",
+            email: nil,
+            authMode: .claudeProfile,
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: true
+        )
+        try await databaseStore.save(
+            AppDatabase(
+                version: AppDatabase.currentVersion,
+                accounts: [claudeAccount],
+                quotaSnapshots: [:],
+                switchLogs: [],
+                activeAccountID: claudeAccountID
+            )
+        )
+
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = makeSignedLikePayload(
+            accountID: "acct_imported",
+            refreshToken: "refresh_imported",
+            displayName: "Imported User",
+            email: "imported@example.com",
+            planType: "team"
+        )
+        let model = AppViewModel(
+            paths: paths,
+            databaseStore: databaseStore,
+            credentialStore: credentialStore,
+            authFileManager: authFileManager,
+            jwtDecoder: JWTClaimsDecoder(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            quotaMonitor: NoopQuotaMonitor(),
+            userNotifier: RecordingUserNotifier(),
+            runtimeInspector: MockRuntimeInspector(result: .verified)
+        )
+
+        await model.prepare()
+
+        XCTAssertEqual(model.database.activeAccountID, claudeAccountID)
+        XCTAssertEqual(model.database.accounts.count, 2)
+        XCTAssertEqual(model.accounts.count, 1)
+        let importedAccount = try XCTUnwrap(model.accounts.first)
+        XCTAssertEqual(importedAccount.codexAccountID, "acct_imported")
+        XCTAssertEqual(model.selectedAccountID, importedAccount.id)
+        XCTAssertTrue(
+            model.database.switchLogs.contains {
+                $0.message == L10n.tr(
+                    "检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。",
+                    importedAccount.displayName
+                )
+            }
+        )
+    }
+
+    func testReconcileCurrentAuthStateKeepsSelectedCodexAccountWhenClaudeIsActive() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let codexHome = root.appendingPathComponent("codex-home", isDirectory: true)
+        let claudeHome = root.appendingPathComponent("claude-home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+        try fileManager.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: claudeHome, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let paths = try AppPaths(
+            fileManager: fileManager,
+            codexHomeOverride: codexHome,
+            claudeHomeOverride: claudeHome,
+            appSupportOverride: appSupport
+        )
+        let databaseStore = AppDatabaseStore(databaseURL: paths.databaseURL)
+        let credentialStore = InMemoryCredentialStore()
+        let claudeAccountID = UUID()
+        let selectedCodexAccountID = UUID()
+        let selectedCodexPayload = makePayload(accountID: "acct_existing", refreshToken: "refresh_existing")
+        let claudeCredential = StoredCredential.claudeProfile(ClaudeProfileSnapshotRef(snapshotID: "snapshot_reconcile"))
+        try credentialStore.save(claudeCredential, for: claudeAccountID)
+        try credentialStore.save(selectedCodexPayload, for: selectedCodexAccountID)
+
+        let claudeAccount = ManagedAccount(
+            id: claudeAccountID,
+            platform: .claude,
+            codexAccountID: claudeCredential.accountIdentifier,
+            displayName: "Claude Profile",
+            email: nil,
+            authMode: .claudeProfile,
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: true
+        )
+        let selectedCodexAccount = ManagedAccount(
+            id: selectedCodexAccountID,
+            codexAccountID: selectedCodexPayload.accountIdentifier,
+            displayName: "Selected Codex",
+            email: "selected@example.com",
+            authMode: .chatgpt,
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        try await databaseStore.save(
+            AppDatabase(
+                version: AppDatabase.currentVersion,
+                accounts: [claudeAccount, selectedCodexAccount],
+                quotaSnapshots: [:],
+                switchLogs: [],
+                activeAccountID: claudeAccountID
+            )
+        )
+
+        let authFileManager = RecordingAuthFileManager()
+        let model = AppViewModel(
+            paths: paths,
+            databaseStore: databaseStore,
+            credentialStore: credentialStore,
+            authFileManager: authFileManager,
+            jwtDecoder: JWTClaimsDecoder(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            quotaMonitor: NoopQuotaMonitor(),
+            userNotifier: RecordingUserNotifier(),
+            runtimeInspector: MockRuntimeInspector(result: .verified)
+        )
+
+        await model.prepare()
+        XCTAssertEqual(model.database.activeAccountID, claudeAccountID)
+        XCTAssertEqual(model.selectedAccountID, selectedCodexAccountID)
+
+        authFileManager.currentAuth = makeSignedLikePayload(
+            accountID: "acct_reconciled",
+            refreshToken: "refresh_reconciled",
+            displayName: "Reconciled User",
+            email: "reconciled@example.com",
+            planType: "pro"
+        )
+
+        await model.reconcileCurrentAuthState()
+
+        XCTAssertEqual(model.database.activeAccountID, claudeAccountID)
+        XCTAssertEqual(model.selectedAccountID, selectedCodexAccountID)
+        XCTAssertEqual(model.selectedAccount?.codexAccountID, "acct_existing")
+        XCTAssertTrue(model.accounts.contains(where: { $0.codexAccountID == "acct_reconciled" }))
+        XCTAssertTrue(
+            model.database.switchLogs.contains {
+                $0.message == L10n.tr(
+                    "检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。",
+                    "Reconciled User"
+                )
+            }
+        )
+    }
+
     func testProgrammaticActivationSkipsAuthReconcile() async throws {
         let currentAccountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
@@ -353,7 +549,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.activeAccount?.codexAccountID, cachedPayload.accountIdentifier)
     }
 
-    func testSelectingClaudePlatformShowsPlaceholderState() async throws {
+    func testSelectingClaudePlatformShowsSupportedState() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
 
@@ -372,15 +568,16 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(harness.model.accounts.count, 0)
         XCTAssertNil(harness.model.selectedAccount)
-        XCTAssertFalse(harness.model.canAddAccountsOnSelectedPlatform)
+        XCTAssertTrue(harness.model.canAddAccountsOnSelectedPlatform)
         XCTAssertEqual(harness.model.selectedPlatformHomeButtonTitle, L10n.tr("打开 ~/.claude"))
+        XCTAssertEqual(harness.model.availableAddAccountModes, [.claudeProfile, .anthropicAPIKey])
         XCTAssertEqual(
             harness.model.selectedPlatformUnsupportedMessage,
-            L10n.tr("Claude 平台框架已预留；本轮仅展示入口，账号接入、切换、CLI 启动和额度同步将在后续变更中实现。")
+            L10n.tr("Claude 当前支持本地 Profile 导入、Anthropic API Key 管理和 Claude CLI 启动；不支持 claude.ai OAuth 切换。")
         )
     }
 
-    func testClaudeAddAccountPlaceholderDoesNotWriteAuth() async throws {
+    func testClaudeAPIKeyLoginDoesNotWriteCodexAuth() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
         let authFileManager = RecordingAuthFileManager()
@@ -394,20 +591,26 @@ final class AppViewModelTests: XCTestCase {
         )
 
         await harness.model.prepare()
+        harness.model.selectPlatform(.claude)
         harness.model.addAccountPlatform = .claude
-        harness.model.apiKeyInput = "sk-test-claude"
+        harness.model.addAccountMode = .anthropicAPIKey
+        harness.model.apiKeyInput = "sk-ant-test-claude"
+        harness.model.apiKeyDisplayName = "Claude API"
 
         await harness.model.startAPIKeyLogin()
 
         XCTAssertTrue(authFileManager.activatedPayloads.isEmpty)
         XCTAssertEqual(harness.model.accounts.count, 1)
+        XCTAssertEqual(harness.model.activeAccount?.platform, .claude)
+        XCTAssertEqual(harness.model.activeAccount?.authMode, .anthropicAPIKey)
+        XCTAssertEqual(harness.model.activeAccount?.displayName, "Claude API")
         XCTAssertEqual(
-            harness.model.addAccountStatus,
-            L10n.tr("Claude 入口已预留，但本轮不接入真实账号登录。")
+            harness.model.banner?.message,
+            L10n.tr("已切换到账号 %@。", "Claude API")
         )
     }
 
-    func testClaudeAccountCannotLaunchCodexCLI() async throws {
+    func testClaudeAccountOpensClaudeCLIWithoutUsingCodexLauncher() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
         let cliLauncher = RecordingCodexCLILauncher()
@@ -424,10 +627,10 @@ final class AppViewModelTests: XCTestCase {
                     account: ManagedAccount(
                         id: claudeAccountID,
                         platform: .claude,
-                        codexAccountID: "claude-placeholder",
-                        displayName: "Claude Placeholder",
-                        email: nil,
-                        authMode: .apiKey,
+                        codexAccountID: "claude-api",
+                        displayName: "Claude API",
+                        email: "sk-ant-...claude",
+                        authMode: .anthropicAPIKey,
                         createdAt: Date(),
                         lastUsedAt: nil,
                         lastQuotaSnapshotAt: nil,
@@ -438,7 +641,7 @@ final class AppViewModelTests: XCTestCase {
                         lastStatusLevel: nil,
                         isActive: false
                     ),
-                    payload: try makeAPIKeyPayload("sk-claude-placeholder"),
+                    payload: .anthropicAPIKey(try AnthropicAPIKeyCredential(apiKey: "sk-ant-test-claude").validated()),
                     snapshot: nil
                 )
             ],
@@ -452,9 +655,10 @@ final class AppViewModelTests: XCTestCase {
         await harness.model.openCodexCLI(for: account, workingDirectoryURL: makeWorkingDirectoryURL("claude-cli"))
 
         XCTAssertEqual(cliLauncher.launchCallCount, 0)
+        XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [makeWorkingDirectoryURL("claude-cli").path])
         XCTAssertEqual(
             harness.model.banner?.message,
-            L10n.tr("Claude 平台框架已预留；本轮仅展示入口，账号接入、切换、CLI 启动和额度同步将在后续变更中实现。")
+            L10n.tr("已为账号 %@ 打开 Claude CLI。", "Claude API")
         )
     }
 
@@ -499,7 +703,7 @@ final class AppViewModelTests: XCTestCase {
                         lastStatusLevel: nil,
                         isActive: false
                     ),
-                    payload: candidatePayload,
+                    payload: .codex(candidatePayload),
                     snapshot: candidateSnapshot
                 )
             ],
@@ -1077,7 +1281,7 @@ final class AppViewModelTests: XCTestCase {
 
 private struct AccountSeed {
     let account: ManagedAccount
-    let payload: CodexAuthPayload
+    let payload: StoredCredential
     let snapshot: QuotaSnapshot?
 }
 

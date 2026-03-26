@@ -108,6 +108,45 @@ final class CachedCredentialStoreTests: XCTestCase {
         XCTAssertEqual(before, after)
     }
 
+    func testPreloadRejectsInvalidCodexPayloadInNewFormatCache() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let accountID = UUID()
+        let cacheFileURL = root.appendingPathComponent("credentials-cache.json")
+        try writeInvalidNewFormatCache(to: cacheFileURL, accountID: accountID)
+
+        let store = CachedCredentialStore(
+            persistentStore: PlaintextCredentialCacheStore(cacheFileURL: cacheFileURL)
+        )
+
+        XCTAssertThrowsError(try store.preload())
+    }
+
+    func testLoadLatestRecoversFromInvalidNewFormatCacheUsingActiveAuthFile() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let accountID = UUID()
+        let cacheFileURL = root.appendingPathComponent("credentials-cache.json")
+        try writeInvalidNewFormatCache(to: cacheFileURL, accountID: accountID)
+
+        let payload = makePayload(accountID: "acct_recovered", refreshToken: "refresh_recovered")
+        let account = makeAccount(id: accountID, codexAccountID: payload.tokens.accountID, isActive: true)
+        let authFileManager = CacheTestAuthFileManager()
+        authFileManager.currentAuth = payload
+
+        let store = CachedCredentialStore(
+            persistentStore: PlaintextCredentialCacheStore(cacheFileURL: cacheFileURL)
+        )
+
+        XCTAssertEqual(try store.loadLatest(for: account, authFileManager: authFileManager), payload)
+
+        let restartedStore = CachedCredentialStore(
+            persistentStore: PlaintextCredentialCacheStore(cacheFileURL: cacheFileURL)
+        )
+        try restartedStore.preload()
+        XCTAssertEqual(try restartedStore.load(for: accountID), payload)
+    }
+
     private func makePayload(accountID: String, refreshToken: String) -> CodexAuthPayload {
         CodexAuthPayload(
             tokens: CodexTokenBundle(
@@ -137,6 +176,29 @@ final class CachedCredentialStoreTests: XCTestCase {
             lastStatusLevel: nil,
             isActive: isActive
         )
+    }
+
+    private func writeInvalidNewFormatCache(to cacheFileURL: URL, accountID: UUID) throws {
+        let directoryURL = cacheFileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let payload = """
+        {
+          "\(accountID.uuidString)" : {
+            "kind" : "codex",
+            "codex" : {
+              "auth_mode" : "chatgpt",
+              "tokens" : {
+                "id_token" : "id_invalid",
+                "access_token" : "access_invalid",
+                "refresh_token" : "refresh_invalid",
+                "account_id" : "acct_invalid"
+              },
+              "last_refresh" : "not-an-iso8601-date"
+            }
+          }
+        }
+        """
+        try Data(payload.utf8).write(to: cacheFileURL, options: [.atomic])
     }
 }
 

@@ -1,0 +1,182 @@
+import XCTest
+@testable import CodexAccountSwitcher
+
+extension ManagedAuthKind {
+    static var apiKey: ManagedAuthKind { .openAIAPIKey }
+}
+
+extension ManagedAccount {
+    init(
+        id: UUID,
+        platform: PlatformKind = .codex,
+        codexAccountID: String,
+        displayName: String,
+        email: String?,
+        authMode: ManagedAuthKind,
+        createdAt: Date,
+        lastUsedAt: Date?,
+        lastQuotaSnapshotAt: Date?,
+        lastRefreshAt: Date?,
+        planType: String?,
+        subscriptionDetails: SubscriptionDetails? = nil,
+        lastStatusCheckAt: Date?,
+        lastStatusMessage: String?,
+        lastStatusLevel: SwitchLogLevel?,
+        isActive: Bool
+    ) {
+        self.init(
+            id: id,
+            platform: platform,
+            accountIdentifier: codexAccountID,
+            displayName: displayName,
+            email: email,
+            authKind: authMode,
+            createdAt: createdAt,
+            lastUsedAt: lastUsedAt,
+            lastQuotaSnapshotAt: lastQuotaSnapshotAt,
+            lastRefreshAt: lastRefreshAt,
+            planType: planType,
+            subscriptionDetails: subscriptionDetails,
+            lastStatusCheckAt: lastStatusCheckAt,
+            lastStatusMessage: lastStatusMessage,
+            lastStatusLevel: lastStatusLevel,
+            isActive: isActive
+        )
+    }
+
+    var codexAccountID: String { accountIdentifier }
+    var authMode: ManagedAuthKind { authKind }
+}
+
+extension StoredCredential {
+    var tokens: CodexTokenBundle {
+        guard let payload = codexPayload else {
+            fatalError("Expected codex credential in test")
+        }
+        return payload.tokens
+    }
+
+    var authMode: ManagedAuthKind {
+        guard let payload = codexPayload else {
+            fatalError("Expected codex credential in test")
+        }
+        return payload.authMode
+    }
+
+    var openAIAPIKey: String? {
+        codexPayload?.openAIAPIKey
+    }
+
+    var lastRefresh: String? {
+        codexPayload?.lastRefresh
+    }
+}
+
+extension InMemoryCredentialStore {
+    func save(_ payload: CodexAuthPayload, for accountID: UUID) throws {
+        try save(.codex(payload), for: accountID)
+    }
+}
+
+extension CachedCredentialStore {
+    func save(_ payload: CodexAuthPayload, for accountID: UUID) throws {
+        try save(.codex(payload), for: accountID)
+    }
+}
+
+func XCTAssertEqual(
+    _ expression1: @autoclosure () throws -> StoredCredential,
+    _ expression2: @autoclosure () throws -> CodexAuthPayload,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertEqual(try? expression1().codexPayload, try? expression2(), file: file, line: line)
+}
+
+func XCTAssertEqual(
+    _ expression1: @autoclosure () throws -> CodexAuthPayload,
+    _ expression2: @autoclosure () throws -> StoredCredential,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertEqual(try? expression1(), try? expression2().codexPayload, file: file, line: line)
+}
+
+extension AppDatabase {
+    init(
+        version: Int,
+        accounts: [ManagedAccount],
+        quotaSnapshots: [String: QuotaSnapshot],
+        switchLogs: [SwitchLogEntry],
+        cliWorkingDirectoriesByAccountID: [String: [String]] = [:],
+        activeAccountID: UUID? = nil
+    ) {
+        self.init(
+            version: version,
+            accounts: accounts,
+            quotaSnapshots: quotaSnapshots,
+            claudeRateLimitSnapshots: [:],
+            switchLogs: switchLogs,
+            cliWorkingDirectoriesByAccountID: cliWorkingDirectoriesByAccountID,
+            activeAccountID: activeAccountID
+        )
+    }
+}
+
+private struct NoopClaudeProfileManager: ClaudeProfileManaging {
+    func currentProfileExists() -> Bool { false }
+    func importCurrentProfile() throws -> ClaudeProfileSnapshotRef { throw NSError(domain: "test", code: 1) }
+    func activateProfile(_ snapshotRef: ClaudeProfileSnapshotRef) throws {}
+    func deleteProfile(_ snapshotRef: ClaudeProfileSnapshotRef) throws {}
+    func prepareIsolatedProfileRoot(for accountID: UUID, snapshotRef: ClaudeProfileSnapshotRef) throws -> URL {
+        FileManager.default.temporaryDirectory
+    }
+    func prepareIsolatedAPIKeyRoot(for accountID: UUID) throws -> URL {
+        FileManager.default.temporaryDirectory
+    }
+}
+
+private struct NoopClaudeAPIClient: ClaudeAPIClienting {
+    func probeStatus(using credential: AnthropicAPIKeyCredential) async throws -> ClaudeRateLimitSnapshot {
+        throw NSError(domain: "test", code: 1)
+    }
+}
+
+private struct NoopClaudeCLILauncher: ClaudeCLILaunching {
+    func launchCLI(for account: ManagedAccount, mode: ClaudeCLILaunchMode, workingDirectoryURL: URL) throws {}
+}
+
+extension AppViewModel {
+    convenience init(
+        paths: AppPaths,
+        databaseStore: AppDatabaseStore,
+        credentialStore: any AccountCredentialStore,
+        authFileManager: any AuthFileManaging,
+        jwtDecoder: JWTClaimsDecoder,
+        oauthClient: any OAuthClienting,
+        quotaMonitor: any QuotaMonitoring,
+        userNotifier: any UserNotifying,
+        runtimeInspector: any CodexRuntimeInspecting,
+        instanceLauncher: any CodexInstanceLaunching = CodexInstanceLauncher(),
+        cliLauncher: any CodexCLILaunching = CodexCLILauncher(),
+        bannerAutoDismissDuration: Duration = .seconds(10)
+    ) {
+        self.init(
+            paths: paths,
+            databaseStore: databaseStore,
+            credentialStore: credentialStore,
+            authFileManager: authFileManager,
+            jwtDecoder: jwtDecoder,
+            oauthClient: oauthClient,
+            claudeProfileManager: NoopClaudeProfileManager(),
+            claudeAPIClient: NoopClaudeAPIClient(),
+            quotaMonitor: quotaMonitor,
+            userNotifier: userNotifier,
+            runtimeInspector: runtimeInspector,
+            instanceLauncher: instanceLauncher,
+            codexCLILauncher: cliLauncher,
+            claudeCLILauncher: NoopClaudeCLILauncher(),
+            bannerAutoDismissDuration: bannerAutoDismissDuration
+        )
+    }
+}
