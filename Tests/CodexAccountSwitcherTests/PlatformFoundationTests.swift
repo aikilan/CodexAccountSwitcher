@@ -64,6 +64,21 @@ final class PlatformFoundationTests: XCTestCase {
         )
     }
 
+    func testSupportsResponsesAPIDetectsMiniMaxAsChatCompletionsOnly() {
+        XCTAssertFalse(
+            ProviderCatalog.supportsResponsesAPI(
+                presetID: ProviderCatalog.customPresetID,
+                baseURL: "https://api.minimax.io/v1"
+            )
+        )
+        XCTAssertFalse(
+            ProviderCatalog.supportsResponsesAPI(
+                presetID: ProviderCatalog.customPresetID,
+                baseURL: "https://api.minimaxi.com/v1"
+            )
+        )
+    }
+
     func testLegacyDatabaseDecodesAccountsAsCodexAndBumpsVersion() throws {
         let accountID = UUID()
         let json = """

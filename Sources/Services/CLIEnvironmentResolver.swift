@@ -206,6 +206,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 throw CLIEnvironmentResolverError.missingProviderCredential
             }
             let provider = try resolvedProviderConfig(for: account)
+            let runtimeBaseURL = normalizedMiniMaxAnthropicBaseURL(provider.baseURL, includeVersion: false) ?? provider.baseURL
             let rootURL = managedClaudeRootURL(
                 for: account.id,
                 target: .claude,
@@ -215,7 +216,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 source: .explicitProvider,
                 model: account.resolvedDefaultModel,
                 modelProvider: nil,
-                baseURL: provider.baseURL,
+                baseURL: runtimeBaseURL,
                 apiKeyEnvName: provider.apiKeyEnvName,
                 apiKey: providerCredential.apiKey
             )
@@ -351,8 +352,13 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
     private func claudeProviderEnvironmentVariables(
         for provider: ClaudeResolvedProvider
     ) -> [String: String] {
-        var variables = ["ANTHROPIC_API_KEY": provider.apiKey]
-        if provider.apiKeyEnvName != "ANTHROPIC_API_KEY" {
+        let usesMiniMaxAuthToken = normalizedMiniMaxAnthropicBaseURL(provider.baseURL, includeVersion: false) != nil
+        let primaryEnvName = usesMiniMaxAuthToken ? "ANTHROPIC_AUTH_TOKEN" : "ANTHROPIC_API_KEY"
+
+        var variables = [primaryEnvName: provider.apiKey]
+        if provider.apiKeyEnvName != primaryEnvName,
+           !(usesMiniMaxAuthToken && provider.apiKeyEnvName == "ANTHROPIC_API_KEY")
+        {
             variables[provider.apiKeyEnvName] = provider.apiKey
         }
         variables["ANTHROPIC_BASE_URL"] = provider.baseURL

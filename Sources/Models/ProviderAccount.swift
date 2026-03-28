@@ -173,7 +173,7 @@ enum ProviderCatalog {
         let host = URL(string: trimmedBaseURL)?.host?.lowercased()
             ?? URL(string: "https://\(trimmedBaseURL)")?.host?.lowercased()
         switch host {
-        case "api.deepseek.com", "api.moonshot.cn", "api.z.ai", "open.bigmodel.cn":
+        case "api.deepseek.com", "api.minimax.io", "api.minimaxi.com", "api.moonshot.cn", "api.z.ai", "open.bigmodel.cn":
             return false
         default:
             return true
@@ -204,4 +204,36 @@ enum ProviderCatalog {
             return L10n.tr("自定义供应商")
         }
     }
+}
+
+func normalizedMiniMaxAnthropicBaseURL(_ baseURL: String, includeVersion: Bool) -> String? {
+    let trimmedBaseURL = baseURL
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    guard !trimmedBaseURL.isEmpty else {
+        return nil
+    }
+
+    let rawURL = URL(string: trimmedBaseURL)
+        ?? URL(string: "https://\(trimmedBaseURL)")
+    guard
+        let rawURL,
+        var components = URLComponents(url: rawURL, resolvingAgainstBaseURL: false),
+        let host = components.host?.lowercased(),
+        host == "api.minimax.io" || host == "api.minimaxi.com"
+    else {
+        return nil
+    }
+
+    let normalizedPath = components.path
+        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        .lowercased()
+    guard normalizedPath == "anthropic" || normalizedPath == "anthropic/v1" else {
+        return nil
+    }
+
+    components.path = includeVersion ? "/anthropic/v1" : "/anthropic"
+    components.query = nil
+    components.fragment = nil
+    return components.string
 }

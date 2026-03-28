@@ -1,6 +1,34 @@
 import Foundation
 import Network
 
+func makeClaudeProviderUpstreamRequest(baseURL: String, apiKey: String, body: Data) -> URLRequest {
+    let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    let requestURL: URL
+
+    if let minimaxBaseURL = normalizedMiniMaxAnthropicBaseURL(trimmedBaseURL, includeVersion: true) {
+        requestURL = URL(string: "\(minimaxBaseURL)/messages")!
+    } else {
+        let normalizedBaseURL = trimmedBaseURL.hasSuffix("/") ? String(trimmedBaseURL.dropLast()) : trimmedBaseURL
+        requestURL = URL(string: "\(normalizedBaseURL)/messages")!
+    }
+
+    var request = URLRequest(url: requestURL)
+    request.httpMethod = "POST"
+    request.httpBody = body
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+
+    if normalizedMiniMaxAnthropicBaseURL(trimmedBaseURL, includeVersion: false) != nil {
+        request.setValue("Bearer \(trimmedAPIKey)", forHTTPHeaderField: "Authorization")
+    } else {
+        request.setValue(trimmedAPIKey, forHTTPHeaderField: "x-api-key")
+    }
+
+    return request
+}
+
 enum ClaudeProviderCodexBridgeManagerError: LocalizedError, Equatable {
     case bridgeStartFailed
     case invalidProvider
@@ -63,16 +91,7 @@ actor ClaudeProviderCodexBridgeManager {
     }
 
     private static func sendUpstreamRequest(baseURL: String, apiKey: String, body: Data) async throws -> (Int, Data) {
-        let normalizedBaseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        let url = URL(string: "\(normalizedBaseURL)/messages")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-
+        let request = makeClaudeProviderUpstreamRequest(baseURL: baseURL, apiKey: apiKey, body: body)
         let (data, response) = try await URLSession.shared.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 500
         return (statusCode, data)

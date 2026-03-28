@@ -1229,6 +1229,133 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(claudeCLILauncher.lastContext?.patchedExecutableURL, patchedRuntimeManager.runtimeURL)
     }
 
+    func testMiniMaxOpenAICompatibleProviderAccountOpensClaudeCodeThroughBridge() async throws {
+        let accountID = UUID()
+        let providerAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let claudeCLILauncher = RecordingClaudeCLILauncher()
+        let patchedRuntimeManager = RecordingClaudePatchedRuntimeManager()
+        let bridgeManager = RecordingCodexOAuthClaudeBridgeManager()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            extraSeeds: [
+                AccountSeed(
+                    account: makeProviderAccount(
+                        id: providerAccountID,
+                        platform: .codex,
+                        identifier: "acct_minimax_provider",
+                        displayName: "MiniMax",
+                        email: "sk-...minimax",
+                        rule: .openAICompatible,
+                        presetID: ProviderCatalog.customPresetID,
+                        providerDisplayName: "MiniMax",
+                        baseURL: "https://api.minimax.io/v1",
+                        envName: "MINIMAX_API_KEY",
+                        model: "MiniMax-M2.7"
+                    ),
+                    payload: try makeProviderCredential("sk-minimax-openai"),
+                    snapshot: nil
+                )
+            ],
+            claudeCLILauncher: claudeCLILauncher,
+            claudePatchedRuntimeManager: patchedRuntimeManager,
+            codexOAuthClaudeBridgeManager: bridgeManager
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.database.account(id: providerAccountID))
+
+        await harness.model.openCLI(
+            for: account,
+            target: .claude,
+            workingDirectoryURL: makeWorkingDirectoryURL("minimax-openai-claude")
+        )
+
+        let bridgeSnapshot = await bridgeManager.snapshot()
+        XCTAssertEqual(bridgeSnapshot.prepareCallCount, 1)
+        XCTAssertEqual(
+            bridgeSnapshot.lastSource,
+            .provider(
+                baseURL: "https://api.minimax.io/v1",
+                apiKeyEnvName: "MINIMAX_API_KEY",
+                apiKey: "sk-minimax-openai",
+                supportsResponsesAPI: false
+            )
+        )
+        XCTAssertEqual(bridgeSnapshot.lastModel, "MiniMax-M2.7")
+        XCTAssertEqual(claudeCLILauncher.launchCallCount, 1)
+        XCTAssertEqual(claudeCLILauncher.lastContext?.patchedExecutableURL, patchedRuntimeManager.runtimeURL)
+    }
+
+    func testMiniMaxClaudeCompatibleProviderAccountOpensClaudeCodeWithAnthropicAuthToken() async throws {
+        let accountID = UUID()
+        let providerAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let claudeCLILauncher = RecordingClaudeCLILauncher()
+        let patchedRuntimeManager = RecordingClaudePatchedRuntimeManager()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            extraSeeds: [
+                AccountSeed(
+                    account: makeProviderAccount(
+                        id: providerAccountID,
+                        platform: .claude,
+                        identifier: "acct_minimax_claude",
+                        displayName: "MiniMax Claude",
+                        email: "sk-...minimax",
+                        rule: .claudeCompatible,
+                        presetID: ProviderCatalog.customPresetID,
+                        providerDisplayName: "MiniMax",
+                        baseURL: "https://api.minimax.io/anthropic/v1",
+                        envName: "MINIMAX_API_KEY",
+                        model: "MiniMax-M2.7"
+                    ),
+                    payload: try makeProviderCredential("sk-minimax-claude"),
+                    snapshot: nil
+                )
+            ],
+            claudeCLILauncher: claudeCLILauncher,
+            claudePatchedRuntimeManager: patchedRuntimeManager
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.database.account(id: providerAccountID))
+
+        await harness.model.openCLI(
+            for: account,
+            target: .claude,
+            workingDirectoryURL: makeWorkingDirectoryURL("minimax-claude-direct")
+        )
+
+        XCTAssertEqual(claudeCLILauncher.launchCallCount, 1)
+        XCTAssertEqual(claudeCLILauncher.lastContext?.patchedExecutableURL, patchedRuntimeManager.runtimeURL)
+        XCTAssertEqual(
+            claudeCLILauncher.lastContext?.providerSnapshot,
+            ResolvedClaudeProviderSnapshot(
+                source: .explicitProvider,
+                model: "MiniMax-M2.7",
+                modelProvider: nil,
+                baseURL: "https://api.minimax.io/anthropic",
+                apiKeyEnvName: "MINIMAX_API_KEY"
+            )
+        )
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "https://api.minimax.io/anthropic")
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_AUTH_TOKEN"], "sk-minimax-claude")
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["MINIMAX_API_KEY"], "sk-minimax-claude")
+        XCTAssertNil(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_API_KEY"])
+        XCTAssertEqual(harness.model.defaultCLITarget(for: account), .claude)
+    }
+
     func testClaudeCompatibleProviderAccountOpensClaudeCodeDirectly() async throws {
         let accountID = UUID()
         let providerAccountID = UUID()
@@ -1532,6 +1659,116 @@ final class AppViewModelTests: XCTestCase {
             "openai-compatible-provider-bridge"
         )
         XCTAssertTrue(codexCLILauncher.lastContext?.configFileContents?.contains("base_url = \"http://127.0.0.1:18082\"") == true)
+    }
+
+    func testMiniMaxOpenAICompatibleProviderAccountOpensCodexCLIThroughChatCompletionsBridge() async throws {
+        let accountID = UUID()
+        let providerAccountID = UUID()
+        let codexCLILauncher = RecordingCodexCLILauncher()
+        let bridgeManager = RecordingOpenAICompatibleProviderCodexBridgeManager()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            extraSeeds: [
+                AccountSeed(
+                    account: makeProviderAccount(
+                        id: providerAccountID,
+                        platform: .codex,
+                        identifier: "acct_minimax_provider",
+                        displayName: "MiniMax",
+                        email: "sk-...minimax",
+                        rule: .openAICompatible,
+                        presetID: ProviderCatalog.customPresetID,
+                        providerDisplayName: "MiniMax",
+                        baseURL: "https://api.minimaxi.com/v1",
+                        envName: "MINIMAX_API_KEY",
+                        model: "MiniMax-M2.7"
+                    ),
+                    payload: try makeProviderCredential("sk-minimax-openai"),
+                    snapshot: nil
+                )
+            ],
+            cliLauncher: codexCLILauncher,
+            openAICompatibleProviderCodexBridgeManager: bridgeManager
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.database.account(id: providerAccountID))
+
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: makeWorkingDirectoryURL("minimax-openai-codex"))
+
+        let bridgeSnapshot = await bridgeManager.snapshot()
+        XCTAssertEqual(bridgeSnapshot.prepareCallCount, 1)
+        XCTAssertEqual(bridgeSnapshot.lastAccountID, providerAccountID)
+        XCTAssertEqual(bridgeSnapshot.lastBaseURL, "https://api.minimaxi.com/v1")
+        XCTAssertEqual(bridgeSnapshot.lastAPIKeyEnvName, "MINIMAX_API_KEY")
+        XCTAssertEqual(bridgeSnapshot.lastAPIKey, "sk-minimax-openai")
+        XCTAssertEqual(bridgeSnapshot.lastModel, "MiniMax-M2.7")
+        XCTAssertEqual(codexCLILauncher.launchCallCount, 1)
+        XCTAssertEqual(
+            codexCLILauncher.lastContext?.environmentVariables["OPENAI_API_KEY"],
+            "openai-compatible-provider-bridge"
+        )
+        XCTAssertTrue(codexCLILauncher.lastContext?.configFileContents?.contains("base_url = \"http://127.0.0.1:18082\"") == true)
+    }
+
+    func testMiniMaxClaudeCompatibleProviderAccountOpensCodexCLIThroughBridge() async throws {
+        let accountID = UUID()
+        let providerAccountID = UUID()
+        let codexCLILauncher = RecordingCodexCLILauncher()
+        let bridgeManager = RecordingClaudeProviderCodexBridgeManager()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            extraSeeds: [
+                AccountSeed(
+                    account: makeProviderAccount(
+                        id: providerAccountID,
+                        platform: .claude,
+                        identifier: "acct_minimax_claude",
+                        displayName: "MiniMax Claude",
+                        email: "sk-...minimax",
+                        rule: .claudeCompatible,
+                        presetID: ProviderCatalog.customPresetID,
+                        providerDisplayName: "MiniMax",
+                        baseURL: "https://api.minimax.io/anthropic/v1",
+                        envName: "MINIMAX_API_KEY",
+                        model: "MiniMax-M2.7"
+                    ),
+                    payload: try makeProviderCredential("sk-minimax-claude"),
+                    snapshot: nil
+                )
+            ],
+            cliLauncher: codexCLILauncher,
+            claudeProviderCodexBridgeManager: bridgeManager
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.database.account(id: providerAccountID))
+
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: makeWorkingDirectoryURL("minimax-claude-codex"))
+
+        let bridgeSnapshot = await bridgeManager.snapshot()
+        XCTAssertEqual(bridgeSnapshot.prepareCallCount, 1)
+        XCTAssertEqual(bridgeSnapshot.lastAccountID, providerAccountID)
+        XCTAssertEqual(bridgeSnapshot.lastBaseURL, "https://api.minimax.io/anthropic/v1")
+        XCTAssertEqual(bridgeSnapshot.lastAPIKeyEnvName, "MINIMAX_API_KEY")
+        XCTAssertEqual(bridgeSnapshot.lastAPIKey, "sk-minimax-claude")
+        XCTAssertEqual(bridgeSnapshot.lastModel, "MiniMax-M2.7")
+        XCTAssertEqual(codexCLILauncher.launchCallCount, 1)
+        XCTAssertEqual(
+            codexCLILauncher.lastContext?.environmentVariables["OPENAI_API_KEY"],
+            "claude-provider-bridge"
+        )
+        XCTAssertTrue(codexCLILauncher.lastContext?.configFileContents?.contains("base_url = \"http://127.0.0.1:18081\"") == true)
     }
 
     func testRefreshAllAccountStatusesRefreshesUnifiedQueue() async throws {
