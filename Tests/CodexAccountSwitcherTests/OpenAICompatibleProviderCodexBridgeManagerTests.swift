@@ -115,4 +115,65 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertEqual(output.first?["type"] as? String, "message")
         XCTAssertEqual(output.last?["type"] as? String, "function_call")
     }
+
+    func testBridgeStreamsCodexCompatibleResponsesEvents() async throws {
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_stream_test",
+            "model": "deepseek-chat",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "content": "嗨。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 9,
+                "completion_tokens": 2,
+                "total_tokens": 11,
+            ],
+        ])
+
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, _ in
+                (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.deepseek.com/v1",
+            apiKeyEnvName: "DEEPSEEK_API_KEY",
+            apiKey: "sk-deepseek-test",
+            model: "deepseek-chat"
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "deepseek-chat",
+            "stream": true,
+            "input": "用一句中文说 hi",
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let text = String(data: data, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Content-Type"), "text/event-stream")
+        XCTAssertTrue(text.contains("event: response.created"))
+        XCTAssertTrue(text.contains("event: response.output_item.done"))
+        XCTAssertTrue(text.contains("event: response.output_text.delta"))
+        XCTAssertTrue(text.contains("\"text\":\"嗨。\""))
+        XCTAssertTrue(text.contains("event: response.completed"))
+        XCTAssertTrue(text.contains("data: [DONE]"))
+    }
 }

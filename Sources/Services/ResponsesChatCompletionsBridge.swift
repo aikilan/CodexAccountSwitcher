@@ -30,12 +30,221 @@ enum ResponsesChatCompletionsBridge {
     }
 
     static func makeResponseStreamData(from response: [String: Any]) -> Data {
-        let eventObject: [String: Any] = [
-            "type": "response.completed",
-            "response": response,
-        ]
-        let payload = jsonString(from: eventObject) ?? "{}"
-        return Data("event: response.completed\ndata: \(payload)\n\ndata: [DONE]\n\n".utf8)
+        let responseID = trimmedString(response["id"]) ?? UUID().uuidString
+        let model = trimmedString(response["model"]) ?? ""
+        let usage = response["usage"] as? [String: Any] ?? [:]
+        let outputItems = (response["output"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+        var events = [String]()
+
+        appendStreamEvent(
+            named: "response.created",
+            payload: [
+                "type": "response.created",
+                "response": [
+                    "id": responseID,
+                    "object": "response",
+                    "model": model,
+                    "status": "in_progress",
+                    "output": [],
+                ],
+            ],
+            to: &events
+        )
+
+        for (outputIndex, item) in outputItems.enumerated() {
+            let itemType = trimmedString(item["type"]) ?? "message"
+            switch itemType {
+            case "message":
+                let itemID = trimmedString(item["id"]) ?? "msg_\(UUID().uuidString)"
+                let role = normalizedRole(from: item["role"])
+                let contentItems = (item["content"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+
+                appendStreamEvent(
+                    named: "response.output_item.added",
+                    payload: [
+                        "type": "response.output_item.added",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "message",
+                            "status": "in_progress",
+                            "role": role,
+                            "content": [],
+                        ],
+                    ],
+                    to: &events
+                )
+
+                var completedContent = [[String: Any]]()
+                for (contentIndex, contentItem) in contentItems.enumerated() {
+                    let contentType = trimmedString(contentItem["type"]) ?? "output_text"
+                    guard contentType == "output_text" || contentType == "text" else { continue }
+                    let text = contentItem["text"] as? String ?? ""
+                    let addedPart: [String: Any] = [
+                        "type": "output_text",
+                        "text": "",
+                    ]
+                    let completedPart: [String: Any] = [
+                        "type": "output_text",
+                        "text": text,
+                    ]
+
+                    appendStreamEvent(
+                        named: "response.content_part.added",
+                        payload: [
+                            "type": "response.content_part.added",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "content_index": contentIndex,
+                            "part": addedPart,
+                        ],
+                        to: &events
+                    )
+                    if !text.isEmpty {
+                        appendStreamEvent(
+                            named: "response.output_text.delta",
+                            payload: [
+                                "type": "response.output_text.delta",
+                                "response_id": responseID,
+                                "output_index": outputIndex,
+                                "item_id": itemID,
+                                "content_index": contentIndex,
+                                "delta": text,
+                            ],
+                            to: &events
+                        )
+                    }
+                    appendStreamEvent(
+                        named: "response.output_text.done",
+                        payload: [
+                            "type": "response.output_text.done",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "content_index": contentIndex,
+                            "text": text,
+                        ],
+                        to: &events
+                    )
+                    appendStreamEvent(
+                        named: "response.content_part.done",
+                        payload: [
+                            "type": "response.content_part.done",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "content_index": contentIndex,
+                            "part": completedPart,
+                        ],
+                        to: &events
+                    )
+                    completedContent.append(completedPart)
+                }
+
+                appendStreamEvent(
+                    named: "response.output_item.done",
+                    payload: [
+                        "type": "response.output_item.done",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "message",
+                            "status": "completed",
+                            "role": role,
+                            "content": completedContent,
+                        ],
+                    ],
+                    to: &events
+                )
+            case "function_call":
+                let itemID = trimmedString(item["id"]) ?? "fc_\(UUID().uuidString)"
+                let callID = trimmedString(item["call_id"]) ?? itemID
+                let name = trimmedString(item["name"]) ?? "tool"
+                let arguments = trimmedString(item["arguments"]) ?? "{}"
+
+                appendStreamEvent(
+                    named: "response.output_item.added",
+                    payload: [
+                        "type": "response.output_item.added",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "function_call",
+                            "status": "in_progress",
+                            "call_id": callID,
+                            "name": name,
+                            "arguments": "",
+                        ],
+                    ],
+                    to: &events
+                )
+                if !arguments.isEmpty {
+                    appendStreamEvent(
+                        named: "response.function_call_arguments.delta",
+                        payload: [
+                            "type": "response.function_call_arguments.delta",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "delta": arguments,
+                        ],
+                        to: &events
+                    )
+                }
+                appendStreamEvent(
+                    named: "response.function_call_arguments.done",
+                    payload: [
+                        "type": "response.function_call_arguments.done",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item_id": itemID,
+                        "arguments": arguments,
+                    ],
+                    to: &events
+                )
+                appendStreamEvent(
+                    named: "response.output_item.done",
+                    payload: [
+                        "type": "response.output_item.done",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": callID,
+                            "name": name,
+                            "arguments": arguments,
+                        ],
+                    ],
+                    to: &events
+                )
+            default:
+                continue
+            }
+        }
+
+        appendStreamEvent(
+            named: "response.completed",
+            payload: [
+                "type": "response.completed",
+                "response": [
+                    "id": responseID,
+                    "object": "response",
+                    "model": model,
+                    "output": outputItems,
+                    "usage": usage,
+                ],
+            ],
+            to: &events
+        )
+
+        events.append("data: [DONE]\n\n")
+        return Data(events.joined().utf8)
     }
 
     static func extractErrorMessage(from data: Data) -> String {
@@ -347,7 +556,9 @@ enum ResponsesChatCompletionsBridge {
         let content = outputTextContent(from: message["content"])
         if !content.isEmpty {
             output.append([
+                "id": "msg_\(UUID().uuidString)",
                 "type": "message",
+                "status": "completed",
                 "role": "assistant",
                 "content": content,
             ])
@@ -363,7 +574,9 @@ enum ResponsesChatCompletionsBridge {
             }
 
             output.append([
+                "id": trimmedString(toolCall["id"]) ?? "fc_\(UUID().uuidString)",
                 "type": "function_call",
+                "status": "completed",
                 "call_id": trimmedString(toolCall["id"]) ?? UUID().uuidString,
                 "name": trimmedString(function["name"]) ?? "tool",
                 "arguments": trimmedString(function["arguments"]) ?? "{}",
@@ -372,7 +585,9 @@ enum ResponsesChatCompletionsBridge {
 
         if output.isEmpty {
             output.append([
+                "id": "msg_\(UUID().uuidString)",
                 "type": "message",
+                "status": "completed",
                 "role": "assistant",
                 "content": [[
                     "type": "output_text",
@@ -458,5 +673,10 @@ enum ResponsesChatCompletionsBridge {
             return nil
         }
         return string
+    }
+
+    private static func appendStreamEvent(named eventName: String, payload: [String: Any], to events: inout [String]) {
+        let payloadString = jsonString(from: payload) ?? "{}"
+        events.append("event: \(eventName)\ndata: \(payloadString)\n\n")
     }
 }
