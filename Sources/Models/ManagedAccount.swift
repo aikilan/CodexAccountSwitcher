@@ -204,10 +204,13 @@ struct AppDatabase: Codable, Sendable {
     var quotaSnapshots: [String: QuotaSnapshot]
     var claudeRateLimitSnapshots: [String: ClaudeRateLimitSnapshot]
     var switchLogs: [SwitchLogEntry]
-    var cliWorkingDirectoriesByAccountID: [String: [String]] = [:]
+    var cliEnvironmentProfiles: [CLIEnvironmentProfile] = CLIEnvironmentProfile.builtInProfiles
+    var defaultCLIEnvironmentIDByAccountID: [String: String] = [:]
+    var preferredCodexEnvironmentIDByAccountID: [String: String] = [:]
+    var cliLaunchHistoryByAccountID: [String: [CLILaunchRecord]] = [:]
     var activeAccountID: UUID?
 
-    static let currentVersion = 4
+    static let currentVersion = 7
 
     static let empty = AppDatabase(
         version: currentVersion,
@@ -215,7 +218,10 @@ struct AppDatabase: Codable, Sendable {
         quotaSnapshots: [:],
         claudeRateLimitSnapshots: [:],
         switchLogs: [],
-        cliWorkingDirectoriesByAccountID: [:],
+        cliEnvironmentProfiles: CLIEnvironmentProfile.builtInProfiles,
+        defaultCLIEnvironmentIDByAccountID: [:],
+        preferredCodexEnvironmentIDByAccountID: [:],
+        cliLaunchHistoryByAccountID: [:],
         activeAccountID: nil
     )
 
@@ -233,7 +239,34 @@ struct AppDatabase: Codable, Sendable {
     }
 
     func cliWorkingDirectories(for accountID: UUID) -> [String] {
-        cliWorkingDirectoriesByAccountID[accountID.uuidString] ?? []
+        cliLaunchHistory(for: accountID).map(\.path)
+    }
+
+    func cliLaunchHistory(for accountID: UUID) -> [CLILaunchRecord] {
+        cliLaunchHistoryByAccountID[accountID.uuidString] ?? []
+    }
+
+    func defaultCLIEnvironmentID(for accountID: UUID) -> String? {
+        defaultCLIEnvironmentIDByAccountID[accountID.uuidString]
+    }
+
+    func preferredCodexEnvironmentID(for accountID: UUID) -> String? {
+        preferredCodexEnvironmentIDByAccountID[accountID.uuidString]
+    }
+
+    func cliEnvironmentProfile(id: String) -> CLIEnvironmentProfile? {
+        cliEnvironmentProfiles.first(where: { $0.id == id })
+    }
+
+    func defaultCLIEnvironment(for account: ManagedAccount) -> CLIEnvironmentProfile {
+        let defaultID = defaultCLIEnvironmentIDByAccountID[account.id.uuidString]
+            ?? CLIEnvironmentProfile.defaultProfileID(for: account.platform)
+        if let profile = cliEnvironmentProfile(id: defaultID) {
+            return profile
+        }
+        return cliEnvironmentProfiles.first(where: { $0.id == CLIEnvironmentProfile.defaultProfileID(for: account.platform) })
+            ?? CLIEnvironmentProfile.builtInProfiles.first(where: { $0.id == CLIEnvironmentProfile.defaultProfileID(for: account.platform) })
+            ?? CLIEnvironmentProfile.builtInProfiles[0]
     }
 
     mutating func setActiveAccount(_ id: UUID?) {
@@ -255,13 +288,16 @@ struct AppDatabase: Codable, Sendable {
             accounts.append(account)
         }
         accounts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        normalizeCLIEnvironmentState()
     }
 
     mutating func removeAccount(id: UUID) {
         accounts.removeAll(where: { $0.id == id })
         quotaSnapshots.removeValue(forKey: id.uuidString)
         claudeRateLimitSnapshots.removeValue(forKey: id.uuidString)
-        cliWorkingDirectoriesByAccountID.removeValue(forKey: id.uuidString)
+        cliLaunchHistoryByAccountID.removeValue(forKey: id.uuidString)
+        defaultCLIEnvironmentIDByAccountID.removeValue(forKey: id.uuidString)
+        preferredCodexEnvironmentIDByAccountID.removeValue(forKey: id.uuidString)
         if activeAccountID == id {
             activeAccountID = nil
         }
@@ -289,16 +325,118 @@ struct AppDatabase: Codable, Sendable {
         }
     }
 
-    mutating func rememberCLIWorkingDirectory(_ directoryURL: URL, for accountID: UUID) {
+    mutating func upsertCLIEnvironmentProfile(_ profile: CLIEnvironmentProfile) {
+        if let index = cliEnvironmentProfiles.firstIndex(where: { $0.id == profile.id }) {
+            cliEnvironmentProfiles[index] = profile
+        } else {
+            cliEnvironmentProfiles.append(profile)
+        }
+        cliEnvironmentProfiles = mergedCLIEnvironmentProfiles(cliEnvironmentProfiles)
+        normalizeCLIEnvironmentState()
+    }
+
+    mutating func removeCLIEnvironmentProfile(id: String) {
+        guard let profile = cliEnvironmentProfile(id: id), !profile.isBuiltIn else { return }
+        cliEnvironmentProfiles.removeAll(where: { $0.id == id })
+
+        for account in accounts {
+            let key = account.id.uuidString
+            if defaultCLIEnvironmentIDByAccountID[key] == id {
+                defaultCLIEnvironmentIDByAccountID[key] = CLIEnvironmentProfile.defaultProfileID(for: account.platform)
+            }
+            if preferredCodexEnvironmentIDByAccountID[key] == id {
+                preferredCodexEnvironmentIDByAccountID[key] = fallbackPreferredCodexEnvironmentID(for: account)
+            }
+        }
+        normalizeCLIEnvironmentState()
+    }
+
+    mutating func setDefaultCLIEnvironmentID(_ environmentID: String, for accountID: UUID) {
+        defaultCLIEnvironmentIDByAccountID[accountID.uuidString] = environmentID
+        if let profile = cliEnvironmentProfile(id: environmentID), profile.target == .codex {
+            preferredCodexEnvironmentIDByAccountID[accountID.uuidString] = environmentID
+        }
+    }
+
+    mutating func rememberCLILaunch(
+        _ directoryURL: URL,
+        environmentProfile: CLIEnvironmentProfile,
+        for accountID: UUID
+    ) {
         let normalizedPath = directoryURL.standardizedFileURL.path
         let key = accountID.uuidString
-        var directories = cliWorkingDirectoriesByAccountID[key] ?? []
-        directories.removeAll(where: { $0 == normalizedPath })
-        directories.insert(normalizedPath, at: 0)
-        if directories.count > 8 {
-            directories = Array(directories.prefix(8))
+        var history = cliLaunchHistoryByAccountID[key] ?? []
+        history.removeAll(where: { $0.path == normalizedPath && $0.environmentID == environmentProfile.id })
+        history.insert(
+            CLILaunchRecord(
+                path: normalizedPath,
+                environmentID: environmentProfile.id,
+                environmentDisplayName: environmentProfile.sanitizedDisplayName,
+                environmentTarget: environmentProfile.target,
+                environmentSummary: environmentProfile.launchSummary,
+                environmentSnapshot: environmentProfile,
+                lastUsedAt: Date()
+            ),
+            at: 0
+        )
+        if history.count > 8 {
+            history = Array(history.prefix(8))
         }
-        cliWorkingDirectoriesByAccountID[key] = directories
+        cliLaunchHistoryByAccountID[key] = history
+    }
+
+    mutating func normalizeCLIEnvironmentState() {
+        cliEnvironmentProfiles = mergedCLIEnvironmentProfiles(cliEnvironmentProfiles)
+
+        for account in accounts {
+            let key = account.id.uuidString
+            let defaultEnvironmentID = defaultCLIEnvironmentIDByAccountID[key]
+                ?? CLIEnvironmentProfile.defaultProfileID(for: account.platform)
+            if cliEnvironmentProfile(id: defaultEnvironmentID) == nil {
+                defaultCLIEnvironmentIDByAccountID[key] = CLIEnvironmentProfile.defaultProfileID(for: account.platform)
+            } else if defaultCLIEnvironmentIDByAccountID[key] == nil {
+                defaultCLIEnvironmentIDByAccountID[key] = defaultEnvironmentID
+            }
+
+            if codexEnvironmentProfile(id: preferredCodexEnvironmentIDByAccountID[key]) == nil {
+                preferredCodexEnvironmentIDByAccountID[key] = fallbackPreferredCodexEnvironmentID(for: account)
+            }
+        }
+    }
+
+    private func codexEnvironmentProfile(id: String?) -> CLIEnvironmentProfile? {
+        guard let id, let profile = cliEnvironmentProfile(id: id), profile.target == .codex else {
+            return nil
+        }
+        return profile
+    }
+
+    private func fallbackPreferredCodexEnvironmentID(for account: ManagedAccount) -> String {
+        let key = account.id.uuidString
+        if let defaultCodexEnvironment = codexEnvironmentProfile(id: defaultCLIEnvironmentIDByAccountID[key]) {
+            return defaultCodexEnvironment.id
+        }
+        return CLIEnvironmentProfile.builtInCodexProfileID
+    }
+
+    private func mergedCLIEnvironmentProfiles(_ profiles: [CLIEnvironmentProfile]) -> [CLIEnvironmentProfile] {
+        var merged = [String: CLIEnvironmentProfile]()
+        for profile in CLIEnvironmentProfile.builtInProfiles {
+            merged[profile.id] = profile
+        }
+        for profile in profiles {
+            if profile.isBuiltIn {
+                continue
+            }
+            merged[profile.id] = profile
+        }
+
+        return merged.values.sorted { lhs, rhs in
+            if lhs.isBuiltIn != rhs.isBuiltIn {
+                return lhs.isBuiltIn && !rhs.isBuiltIn
+            }
+            return lhs.sanitizedDisplayName.localizedCaseInsensitiveCompare(rhs.sanitizedDisplayName) == .orderedAscending
+        }
     }
 }
 
@@ -309,6 +447,10 @@ extension AppDatabase {
         case quotaSnapshots
         case claudeRateLimitSnapshots
         case switchLogs
+        case cliEnvironmentProfiles
+        case defaultCLIEnvironmentIDByAccountID
+        case preferredCodexEnvironmentIDByAccountID
+        case cliLaunchHistoryByAccountID
         case cliWorkingDirectoriesByAccountID
         case activeAccountID
     }
@@ -320,17 +462,62 @@ extension AppDatabase {
         let quotaSnapshots = try container.decodeIfPresent([String: QuotaSnapshot].self, forKey: .quotaSnapshots) ?? [:]
         let claudeRateLimitSnapshots = try container.decodeIfPresent([String: ClaudeRateLimitSnapshot].self, forKey: .claudeRateLimitSnapshots) ?? [:]
         let switchLogs = try container.decodeIfPresent([SwitchLogEntry].self, forKey: .switchLogs) ?? []
-        let cliWorkingDirectoriesByAccountID = try container.decodeIfPresent([String: [String]].self, forKey: .cliWorkingDirectoriesByAccountID) ?? [:]
+        let cliEnvironmentProfiles = try container.decodeIfPresent([CLIEnvironmentProfile].self, forKey: .cliEnvironmentProfiles)
+            ?? CLIEnvironmentProfile.builtInProfiles
+        let defaultCLIEnvironmentIDByAccountID = try container.decodeIfPresent([String: String].self, forKey: .defaultCLIEnvironmentIDByAccountID) ?? [:]
+        let preferredCodexEnvironmentIDByAccountID = try container.decodeIfPresent([String: String].self, forKey: .preferredCodexEnvironmentIDByAccountID) ?? [:]
+        let cliLaunchHistoryByAccountID = try container.decodeIfPresent([String: [CLILaunchRecord]].self, forKey: .cliLaunchHistoryByAccountID) ?? [:]
+        let legacyCLIDirectories = try container.decodeIfPresent([String: [String]].self, forKey: .cliWorkingDirectoriesByAccountID) ?? [:]
         let activeAccountID = try container.decodeIfPresent(UUID.self, forKey: .activeAccountID)
 
-        self.init(
+        var database = AppDatabase(
             version: max(version, Self.currentVersion),
             accounts: accounts,
             quotaSnapshots: quotaSnapshots,
             claudeRateLimitSnapshots: claudeRateLimitSnapshots,
             switchLogs: switchLogs,
-            cliWorkingDirectoriesByAccountID: cliWorkingDirectoriesByAccountID,
+            cliEnvironmentProfiles: cliEnvironmentProfiles,
+            defaultCLIEnvironmentIDByAccountID: defaultCLIEnvironmentIDByAccountID,
+            preferredCodexEnvironmentIDByAccountID: preferredCodexEnvironmentIDByAccountID,
+            cliLaunchHistoryByAccountID: cliLaunchHistoryByAccountID,
             activeAccountID: activeAccountID
         )
+
+        if database.cliLaunchHistoryByAccountID.isEmpty, !legacyCLIDirectories.isEmpty {
+            for account in database.accounts {
+                let key = account.id.uuidString
+                let defaultEnvironment = database.defaultCLIEnvironment(for: account)
+                let legacyRecords = (legacyCLIDirectories[key] ?? []).map {
+                    CLILaunchRecord(
+                        path: $0,
+                        environmentID: defaultEnvironment.id,
+                        environmentDisplayName: defaultEnvironment.sanitizedDisplayName,
+                        environmentTarget: defaultEnvironment.target,
+                        environmentSummary: defaultEnvironment.launchSummary,
+                        environmentSnapshot: defaultEnvironment
+                    )
+                }
+                if !legacyRecords.isEmpty {
+                    database.cliLaunchHistoryByAccountID[key] = legacyRecords
+                }
+            }
+        }
+
+        database.normalizeCLIEnvironmentState()
+        self = database
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(accounts, forKey: .accounts)
+        try container.encode(quotaSnapshots, forKey: .quotaSnapshots)
+        try container.encode(claudeRateLimitSnapshots, forKey: .claudeRateLimitSnapshots)
+        try container.encode(switchLogs, forKey: .switchLogs)
+        try container.encode(cliEnvironmentProfiles, forKey: .cliEnvironmentProfiles)
+        try container.encode(defaultCLIEnvironmentIDByAccountID, forKey: .defaultCLIEnvironmentIDByAccountID)
+        try container.encode(preferredCodexEnvironmentIDByAccountID, forKey: .preferredCodexEnvironmentIDByAccountID)
+        try container.encode(cliLaunchHistoryByAccountID, forKey: .cliLaunchHistoryByAccountID)
+        try container.encodeIfPresent(activeAccountID, forKey: .activeAccountID)
     }
 }

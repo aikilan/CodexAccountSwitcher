@@ -111,13 +111,33 @@ extension AppDatabase {
         cliWorkingDirectoriesByAccountID: [String: [String]] = [:],
         activeAccountID: UUID? = nil
     ) {
+        let launchHistory = Dictionary(uniqueKeysWithValues: accounts.map { account in
+            let profile = CLIEnvironmentProfile.builtInProfiles.first(where: {
+                $0.id == CLIEnvironmentProfile.defaultProfileID(for: account.platform)
+            }) ?? CLIEnvironmentProfile.builtInProfiles[0]
+            let records = (cliWorkingDirectoriesByAccountID[account.id.uuidString] ?? []).map {
+                CLILaunchRecord(
+                    path: $0,
+                    environmentID: profile.id,
+                    environmentDisplayName: profile.sanitizedDisplayName,
+                    environmentTarget: profile.target,
+                    environmentSummary: profile.launchSummary,
+                    environmentSnapshot: profile
+                )
+            }
+            return (account.id.uuidString, records)
+        })
         self.init(
             version: version,
             accounts: accounts,
             quotaSnapshots: quotaSnapshots,
             claudeRateLimitSnapshots: [:],
             switchLogs: switchLogs,
-            cliWorkingDirectoriesByAccountID: cliWorkingDirectoriesByAccountID,
+            cliEnvironmentProfiles: CLIEnvironmentProfile.builtInProfiles,
+            defaultCLIEnvironmentIDByAccountID: Dictionary(uniqueKeysWithValues: accounts.map {
+                ($0.id.uuidString, CLIEnvironmentProfile.defaultProfileID(for: $0.platform))
+            }),
+            cliLaunchHistoryByAccountID: launchHistory,
             activeAccountID: activeAccountID
         )
     }
@@ -143,7 +163,27 @@ private struct NoopClaudeAPIClient: ClaudeAPIClienting {
 }
 
 private struct NoopClaudeCLILauncher: ClaudeCLILaunching {
-    func launchCLI(for account: ManagedAccount, mode: ClaudeCLILaunchMode, workingDirectoryURL: URL) throws {}
+    func launchCLI(context: ResolvedClaudeCLILaunchContext) throws {}
+}
+
+private struct NoopClaudePatchedRuntimeManager: ClaudePatchedRuntimeManaging {
+    func preparePatchedRuntime(model: String, appSupportDirectoryURL: URL) throws -> URL {
+        appSupportDirectoryURL.appendingPathComponent("noop-claude", isDirectory: false)
+    }
+}
+
+private struct NoopCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManaging {
+    func prepareBridge(
+        accountID: UUID,
+        payload: CodexAuthPayload,
+        model: String
+    ) async throws -> PreparedCodexOAuthClaudeBridge {
+        PreparedCodexOAuthClaudeBridge(
+            baseURL: "http://127.0.0.1:18080",
+            apiKeyEnvName: "ANTHROPIC_API_KEY",
+            apiKey: "codex-oauth-bridge"
+        )
+    }
 }
 
 extension AppViewModel {
@@ -158,7 +198,11 @@ extension AppViewModel {
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
         instanceLauncher: any CodexInstanceLaunching = CodexInstanceLauncher(),
+        cliEnvironmentResolver: any CLIEnvironmentResolving = CLIEnvironmentResolver(),
         cliLauncher: any CodexCLILaunching = CodexCLILauncher(),
+        claudeCLILauncher: any ClaudeCLILaunching = NoopClaudeCLILauncher(),
+        claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = NoopClaudePatchedRuntimeManager(),
+        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = NoopCodexOAuthClaudeBridgeManager(),
         bannerAutoDismissDuration: Duration = .seconds(10)
     ) {
         self.init(
@@ -174,8 +218,11 @@ extension AppViewModel {
             userNotifier: userNotifier,
             runtimeInspector: runtimeInspector,
             instanceLauncher: instanceLauncher,
+            cliEnvironmentResolver: cliEnvironmentResolver,
             codexCLILauncher: cliLauncher,
-            claudeCLILauncher: NoopClaudeCLILauncher(),
+            claudeCLILauncher: claudeCLILauncher,
+            claudePatchedRuntimeManager: claudePatchedRuntimeManager,
+            codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration
         )
     }

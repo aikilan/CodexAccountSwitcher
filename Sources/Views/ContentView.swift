@@ -392,6 +392,7 @@ private struct AccountDetailView: View {
     let onDelete: () -> Void
 
     @State private var draftName = ""
+    @State private var isManagingCLIEnvironments = false
 
     var body: some View {
         ScrollView {
@@ -439,6 +440,9 @@ private struct AccountDetailView: View {
         }
         .onChange(of: account.id) { _, _ in
             draftName = account.displayName
+        }
+        .sheet(isPresented: $isManagingCLIEnvironments) {
+            CLIEnvironmentManagerSheet(model: model, account: account)
         }
     }
 
@@ -645,11 +649,35 @@ private struct AccountDetailView: View {
                 }
             }
 
-            if account.platform == .codex {
-                Text(isolatedLaunchHelpText)
+            HStack(alignment: .center, spacing: 12) {
+                Text(L10n.tr("默认 CLI 环境"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Picker(
+                    L10n.tr("默认 CLI 环境"),
+                    selection: Binding(
+                        get: { model.defaultCLIEnvironmentID(for: account.id) ?? selectedCLIEnvironment.id },
+                        set: { model.setDefaultCLIEnvironmentID($0, for: account.id) }
+                    )
+                ) {
+                    ForEach(model.cliEnvironmentProfiles) { profile in
+                        Text("\(profile.sanitizedDisplayName) · \(profile.target.displayName)")
+                            .tag(profile.id)
+                    }
+                }
+                .frame(maxWidth: 320)
+
+                Button(L10n.tr("管理 CLI 环境")) {
+                    isManagingCLIEnvironments = true
+                }
+                .buttonStyle(.bordered)
             }
+
+            Text(cliLaunchHelpText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -660,19 +688,19 @@ private struct AccountDetailView: View {
             Text(L10n.tr("已打开目录"))
                 .font(.title2.bold())
 
-            if recentCLIDirectories.isEmpty {
+            if recentCLILaunches.isEmpty {
                 Text(L10n.tr("还没有打开过目录。先选择一个目录打开 CLI，后续就能从这里快速启动。"))
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(recentCLIDirectories, id: \.self) { path in
+                    ForEach(recentCLILaunches) { record in
                         CLIDirectoryHistoryCard(
-                            path: path,
+                            record: record,
                             isDisabled: model.isLaunchingCLI(for: account.id)
                                 || model.isLaunchingIsolatedInstance(for: account.id)
                                 || model.isSwitchInProgress,
                             onOpen: {
-                                launchCLI(in: URL(fileURLWithPath: path, isDirectory: true))
+                                launchCLI(record: record)
                             }
                         )
                     }
@@ -709,17 +737,38 @@ private struct AccountDetailView: View {
         return L10n.tr("切换到此账号")
     }
 
-    private var isolatedLaunchHelpText: String {
-        if model.hasLaunchedIsolatedInstance(for: account.id) {
-            return L10n.tr("该账号的独立实例已在当前会话中启动，为避免重复拉起，当前已禁用再次启动。")
+    private var cliLaunchHelpText: String {
+        switch selectedCLIEnvironment.target {
+        case .claude:
+            switch selectedCLIEnvironment.resolvedClaude.providerSource {
+            case .accountCredentials:
+                if account.platform == .codex {
+                    return L10n.tr("打开 CLI 会启动应用生成的 Claude Code patched runtime；当前账号是 Codex 时，即使环境显示为 Claude 凭据模式，也会直接复用该账号当前的 Codex OAuth 或 API Key 启动，不要求 Claude 登录，也不需要额外填写 Base URL 或 API Key。")
+                }
+                return L10n.tr("打开 CLI 会按当前默认环境启动 Claude Code；此模式会沿用 Claude 账号凭据或 Anthropic API Key。")
+            case .explicitProvider:
+                return L10n.tr("打开 CLI 会启动应用生成的 Claude Code patched runtime；此模式不会要求 Claude 登录，若 provider 配置不完整会直接报错。")
+            case .inheritCodexEnvironment:
+                if account.platform == .codex {
+                    return L10n.tr("打开 CLI 会启动应用生成的 Claude Code patched runtime；当前账号是 Codex 时，会默认继承该账号的 Codex 环境启动。若来源环境本身使用当前账号凭据，会直接复用当前 Codex OAuth 或 API Key，不要求 Claude 登录，也不需要手动填写 Base URL 或 API Key。")
+                }
+                return L10n.tr("打开 CLI 会启动应用生成的 Claude Code patched runtime；此模式不会要求 Claude 登录。当前账号不是 Codex 时，需要在环境里手动指定一个覆盖来源 Codex 环境。")
+            }
+        case .codex:
+            if account.platform != .codex {
+                return L10n.tr("打开 CLI 会按当前默认环境启动 Codex CLI；如果该环境未使用账号凭据，应用会生成独立 CODEX_HOME 和配置文件。")
+            }
+            if model.hasLaunchedIsolatedInstance(for: account.id) {
+                return L10n.tr("该账号的独立实例已在当前会话中启动，为避免重复拉起，当前已禁用再次启动。")
+            }
+            if account.isActive && account.authKind == .chatgpt && selectedCLIEnvironment.resolvedCodex.useAccountCredentials {
+                return L10n.tr("打开 CLI 会直接使用当前 ~/.codex；当前活跃的 ChatGPT 账号不能再起独立实例，避免触发 refresh_token_reused。")
+            }
+            if account.isActive && selectedCLIEnvironment.resolvedCodex.useAccountCredentials && !selectedCLIEnvironment.resolvedCodex.requiresConfigFile {
+                return L10n.tr("打开 CLI 会直接使用当前 ~/.codex；独立实例仍会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。")
+            }
+            return L10n.tr("打开 CLI 时会为该账号使用独立 CODEX_HOME；独立实例也会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。")
         }
-        if account.isActive && account.authKind == .chatgpt {
-            return L10n.tr("打开 CLI 会直接使用当前 ~/.codex；当前活跃的 ChatGPT 账号不能再起独立实例，避免触发 refresh_token_reused。")
-        }
-        if account.isActive {
-            return L10n.tr("打开 CLI 会直接使用当前 ~/.codex；独立实例仍会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。")
-        }
-        return L10n.tr("打开 CLI 时会为该账号使用独立 CODEX_HOME；独立实例也会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。")
     }
 
     private var isolatedInstanceButtonTitle: String {
@@ -732,8 +781,12 @@ private struct AccountDetailView: View {
         return L10n.tr("启动独立实例")
     }
 
-    private var recentCLIDirectories: [String] {
-        model.cliWorkingDirectories(for: account.id)
+    private var selectedCLIEnvironment: CLIEnvironmentProfile {
+        model.defaultCLIEnvironment(for: account)
+    }
+
+    private var recentCLILaunches: [CLILaunchRecord] {
+        model.cliLaunchHistory(for: account.id)
     }
 
     private func chooseDirectoryAndOpenCLI() {
@@ -742,11 +795,9 @@ private struct AccountDetailView: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
-        panel.prompt = account.platform == .codex ? L10n.tr("打开 CLI") : L10n.tr("打开 Claude CLI")
-        panel.message = account.platform == .codex
-            ? L10n.tr("选择一个目录作为 Codex CLI 的启动目录。")
-            : L10n.tr("选择一个目录作为 Claude CLI 的启动目录。")
-        if let path = recentCLIDirectories.first {
+        panel.prompt = L10n.tr("打开 %@", selectedCLIEnvironment.target.displayName)
+        panel.message = L10n.tr("选择一个目录作为 %@ 的启动目录。", selectedCLIEnvironment.target.displayName)
+        if let path = recentCLILaunches.first?.path {
             panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
         }
 
@@ -756,7 +807,17 @@ private struct AccountDetailView: View {
 
     private func launchCLI(in directoryURL: URL) {
         Task {
-            await model.openCodexCLI(for: account, workingDirectoryURL: directoryURL)
+            await model.openCLI(for: account, workingDirectoryURL: directoryURL)
+        }
+    }
+
+    private func launchCLI(record: CLILaunchRecord) {
+        Task {
+            await model.openCLI(
+                for: account,
+                environmentProfile: record.environmentSnapshot,
+                workingDirectoryURL: URL(fileURLWithPath: record.path, isDirectory: true)
+            )
         }
     }
 
@@ -807,7 +868,7 @@ private struct AccountDetailView: View {
 }
 
 private struct CLIDirectoryHistoryCard: View {
-    let path: String
+    let record: CLILaunchRecord
     let isDisabled: Bool
     let onOpen: () -> Void
 
@@ -817,7 +878,7 @@ private struct CLIDirectoryHistoryCard: View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .center, spacing: 8) {
-                    Text(URL(fileURLWithPath: path).lastPathComponent)
+                    Text(URL(fileURLWithPath: record.path).lastPathComponent)
                         .font(.headline)
                         .lineLimit(1)
 
@@ -828,10 +889,30 @@ private struct CLIDirectoryHistoryCard: View {
                         .foregroundStyle(isDisabled ? .tertiary : .secondary)
                 }
 
-                Text(path)
+                HStack(spacing: 8) {
+                    Text(record.environmentDisplayName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+
+                    Text(record.environmentTarget.displayName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(record.path)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+
+                if !record.environmentSummary.isEmpty {
+                    Text(record.environmentSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)

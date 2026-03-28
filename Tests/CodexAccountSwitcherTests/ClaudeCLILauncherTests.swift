@@ -3,17 +3,10 @@ import XCTest
 @testable import CodexAccountSwitcher
 
 final class ClaudeCLILauncherTests: XCTestCase {
-    func testLaunchCLIAnthropicModeUsesFixedBinaryAndInjectsEnvironment() throws {
+    func testLaunchCLIWritesManagedConfigAndInjectsEnvironment() throws {
         let fileManager = LauncherTestFileManager()
         let homeURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         fileManager.mockHomeDirectory = homeURL
-        fileManager.executablePaths.insert(
-            homeURL
-                .appendingPathComponent(".local", isDirectory: true)
-                .appendingPathComponent("bin", isDirectory: true)
-                .appendingPathComponent("claude")
-                .path
-        )
 
         var capturedLines: [String] = []
         let launcher = ClaudeCLILauncher(
@@ -25,30 +18,28 @@ final class ClaudeCLILauncherTests: XCTestCase {
 
         let rootURL = homeURL.appendingPathComponent("isolated-root", isDirectory: true)
         let workingDirectoryURL = homeURL.appendingPathComponent("workspace", isDirectory: true)
+        let patchedExecutableURL = homeURL.appendingPathComponent("patched-runtime/bin/claude", isDirectory: false)
 
         try launcher.launchCLI(
-            for: ManagedAccount(
-                id: UUID(),
-                platform: .claude,
-                codexAccountID: "claude-test",
-                displayName: "Claude Test",
-                email: nil,
-                authMode: .anthropicAPIKey,
-                createdAt: Date(),
-                lastUsedAt: nil,
-                lastQuotaSnapshotAt: nil,
-                lastRefreshAt: nil,
-                planType: nil,
-                lastStatusCheckAt: nil,
-                lastStatusMessage: nil,
-                lastStatusLevel: nil,
-                isActive: false
-            ),
-            mode: .anthropicAPIKey(
+            context: ResolvedClaudeCLILaunchContext(
+                accountID: UUID(),
+                workingDirectoryURL: workingDirectoryURL,
                 rootURL: rootURL,
-                credential: try AnthropicAPIKeyCredential(apiKey: "sk-ant-test").validated()
-            ),
-            workingDirectoryURL: workingDirectoryURL
+                configDirectoryURL: rootURL.appendingPathComponent(".claude", isDirectory: true),
+                patchedExecutableURL: patchedExecutableURL,
+                providerSnapshot: ResolvedClaudeProviderSnapshot(
+                    source: .explicitProvider,
+                    model: "claude-sonnet-4.5",
+                    modelProvider: "openrouter",
+                    baseURL: "https://proxy.example/v1",
+                    apiKeyEnvName: "ANTHROPIC_API_KEY"
+                ),
+                environmentVariables: [
+                    "ANTHROPIC_API_KEY": "sk-ant-test",
+                    "ANTHROPIC_BASE_URL": "https://proxy.example/v1",
+                ],
+                arguments: ["--model", "claude-sonnet-4.5"]
+            )
         )
 
         XCTAssertEqual(
@@ -56,7 +47,7 @@ final class ClaudeCLILauncherTests: XCTestCase {
             [
                 "tell application \"Terminal\"",
                 "activate",
-                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && env HOME=\\\"\(rootURL.path)\\\" CLAUDE_CONFIG_DIR=\\\"\(rootURL.appendingPathComponent(".claude").path)\\\" ANTHROPIC_API_KEY=\\\"sk-ant-test\\\" \\\"\(homeURL.appendingPathComponent(".local/bin/claude").path)\\\"\"",
+                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && env ANTHROPIC_API_KEY=\\\"sk-ant-test\\\" ANTHROPIC_BASE_URL=\\\"https://proxy.example/v1\\\" CLAUDE_CONFIG_DIR=\\\"\(rootURL.appendingPathComponent(".claude").path)\\\" HOME=\\\"\(rootURL.path)\\\" \\\"\(patchedExecutableURL.path)\\\" \\\"--model\\\" \\\"claude-sonnet-4.5\\\"\"",
                 "end tell",
             ]
         )
@@ -65,13 +56,8 @@ final class ClaudeCLILauncherTests: XCTestCase {
 
 private final class LauncherTestFileManager: FileManager {
     var mockHomeDirectory = FileManager.default.homeDirectoryForCurrentUser
-    var executablePaths: Set<String> = []
 
     override var homeDirectoryForCurrentUser: URL {
         mockHomeDirectory
-    }
-
-    override func isExecutableFile(atPath path: String) -> Bool {
-        executablePaths.contains(path)
     }
 }

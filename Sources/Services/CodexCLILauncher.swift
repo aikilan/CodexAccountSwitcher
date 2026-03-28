@@ -12,8 +12,6 @@ enum CodexCLILauncherError: LocalizedError, Equatable {
 }
 
 struct CodexCLILauncher {
-    private static let instancesDirectoryName = "isolated-codex-instances"
-
     private let fileManager: FileManager
     private let runAppleScript: ([String]) throws -> Void
 
@@ -25,37 +23,54 @@ struct CodexCLILauncher {
         self.runAppleScript = runAppleScript
     }
 
-    func launchCLI(
-        for account: ManagedAccount,
-        mode: CodexCLILaunchMode,
-        workingDirectoryURL: URL,
-        appSupportDirectoryURL: URL
-    ) throws {
-        let command: String
-        let prefix = "cd \(shellQuoted(workingDirectoryURL.standardizedFileURL.path)) && "
-
-        switch mode {
-        case .globalCurrentAuth:
-            command = prefix + "codex"
-        case let .isolatedAccount(payload):
-            let codexHomeURL = isolatedCodexHomeURL(for: account, appSupportDirectoryURL: appSupportDirectoryURL)
-            try fileManager.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
-            let authFileURL = codexHomeURL.appendingPathComponent("auth.json")
-            try AuthFileManager(authFileURL: authFileURL, fileManager: fileManager).activate(payload)
-            command = prefix + "env CODEX_HOME=\(shellQuoted(codexHomeURL.path)) codex"
-        }
-
+    func launchCLI(context: ResolvedCodexCLILaunchContext) throws {
+        let command = try command(for: context)
         try runAppleScript(appleScriptLines(for: command))
     }
 
-    private func isolatedCodexHomeURL(
-        for account: ManagedAccount,
-        appSupportDirectoryURL: URL
-    ) -> URL {
-        appSupportDirectoryURL
-            .appendingPathComponent(Self.instancesDirectoryName, isDirectory: true)
-            .appendingPathComponent(account.id.uuidString, isDirectory: true)
-            .appendingPathComponent("codex-home", isDirectory: true)
+    private func command(for context: ResolvedCodexCLILaunchContext) throws -> String {
+        let prefix = "cd \(shellQuoted(context.workingDirectoryURL.standardizedFileURL.path)) && "
+
+        switch context.mode {
+        case .globalCurrentAuth:
+            return prefix + executableCommand(arguments: context.arguments)
+        case .isolated:
+            guard let codexHomeURL = context.codexHomeURL else {
+                return prefix + executableCommand(arguments: context.arguments)
+            }
+            try fileManager.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+            if let payload = context.authPayload {
+                let authFileURL = codexHomeURL.appendingPathComponent("auth.json")
+                try AuthFileManager(authFileURL: authFileURL, fileManager: fileManager).activate(payload)
+            }
+            if let configFileContents = context.configFileContents {
+                let configURL = codexHomeURL.appendingPathComponent("config.toml")
+                try configFileContents.write(to: configURL, atomically: true, encoding: .utf8)
+            }
+
+            var environmentVariables = context.environmentVariables
+            environmentVariables["CODEX_HOME"] = codexHomeURL.path
+            return prefix + envCommand(
+                environmentVariables: environmentVariables,
+                executable: executableCommand(arguments: context.arguments)
+            )
+        }
+    }
+
+    private func executableCommand(arguments: [String]) -> String {
+        let parts = ["codex"] + arguments.map(shellQuoted)
+        return parts.joined(separator: " ")
+    }
+
+    private func envCommand(environmentVariables: [String: String], executable: String) -> String {
+        let prefixes = environmentVariables
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(shellQuoted($0.value))" }
+            .joined(separator: " ")
+        if prefixes.isEmpty {
+            return executable
+        }
+        return "env \(prefixes) \(executable)"
     }
 
     private func appleScriptLines(for command: String) -> [String] {

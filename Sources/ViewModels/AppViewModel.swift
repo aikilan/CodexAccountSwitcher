@@ -137,8 +137,11 @@ final class AppViewModel: ObservableObject {
     private let userNotifier: any UserNotifying
     private let runtimeInspector: any CodexRuntimeInspecting
     private let instanceLauncher: any CodexInstanceLaunching
+    private let cliEnvironmentResolver: any CLIEnvironmentResolving
     private let codexCLILauncher: any CodexCLILaunching
     private let claudeCLILauncher: any ClaudeCLILaunching
+    private let claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging
+    private let codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     private let runtimes: [PlatformKind: any PlatformRuntime]
     private let bannerAutoDismissDuration: Duration
     private var browserSession: BrowserOAuthSession?
@@ -163,8 +166,11 @@ final class AppViewModel: ObservableObject {
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
         instanceLauncher: any CodexInstanceLaunching = CodexInstanceLauncher(),
+        cliEnvironmentResolver: any CLIEnvironmentResolving = CLIEnvironmentResolver(),
         codexCLILauncher: any CodexCLILaunching = CodexCLILauncher(),
         claudeCLILauncher: any ClaudeCLILaunching = ClaudeCLILauncher(),
+        claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = ClaudePatchedRuntimeManager(),
+        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = CodexOAuthClaudeBridgeManager(),
         platformRuntimes: [any PlatformRuntime] = [CodexPlatformRuntime(), ClaudePlatformRuntime()],
         bannerAutoDismissDuration: Duration = .seconds(10)
     ) {
@@ -180,8 +186,11 @@ final class AppViewModel: ObservableObject {
         self.userNotifier = userNotifier
         self.runtimeInspector = runtimeInspector
         self.instanceLauncher = instanceLauncher
+        self.cliEnvironmentResolver = cliEnvironmentResolver
         self.codexCLILauncher = codexCLILauncher
         self.claudeCLILauncher = claudeCLILauncher
+        self.claudePatchedRuntimeManager = claudePatchedRuntimeManager
+        self.codexOAuthClaudeBridgeManager = codexOAuthClaudeBridgeManager
         self.runtimes = Dictionary(uniqueKeysWithValues: platformRuntimes.map { ($0.platform, $0) })
         self.bannerAutoDismissDuration = bannerAutoDismissDuration
     }
@@ -217,8 +226,11 @@ final class AppViewModel: ObservableObject {
                 quotaMonitor: quotaMonitor,
                 userNotifier: userNotifier,
                 runtimeInspector: runtimeInspector,
+                cliEnvironmentResolver: CLIEnvironmentResolver(),
                 codexCLILauncher: CodexCLILauncher(),
                 claudeCLILauncher: ClaudeCLILauncher(),
+                claudePatchedRuntimeManager: ClaudePatchedRuntimeManager(),
+                codexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManager(),
                 platformRuntimes: [CodexPlatformRuntime(), ClaudePlatformRuntime()]
             )
         } catch {
@@ -344,6 +356,46 @@ final class AppViewModel: ObservableObject {
 
     func cliWorkingDirectories(for accountID: UUID) -> [String] {
         database.cliWorkingDirectories(for: accountID)
+    }
+
+    func cliLaunchHistory(for accountID: UUID) -> [CLILaunchRecord] {
+        database.cliLaunchHistory(for: accountID)
+    }
+
+    var cliEnvironmentProfiles: [CLIEnvironmentProfile] {
+        database.cliEnvironmentProfiles
+    }
+
+    func defaultCLIEnvironment(for account: ManagedAccount) -> CLIEnvironmentProfile {
+        database.defaultCLIEnvironment(for: account)
+    }
+
+    func defaultCLIEnvironmentID(for accountID: UUID) -> String? {
+        database.defaultCLIEnvironmentID(for: accountID)
+    }
+
+    func setDefaultCLIEnvironmentID(_ environmentID: String, for accountID: UUID) {
+        guard database.cliEnvironmentProfile(id: environmentID) != nil else { return }
+        database.setDefaultCLIEnvironmentID(environmentID, for: accountID)
+        Task {
+            try? await persistDatabase()
+        }
+    }
+
+    func saveCLIEnvironmentProfile(_ profile: CLIEnvironmentProfile) {
+        var savedProfile = profile
+        savedProfile.displayName = savedProfile.sanitizedDisplayName
+        database.upsertCLIEnvironmentProfile(savedProfile)
+        Task {
+            try? await persistDatabase()
+        }
+    }
+
+    func deleteCLIEnvironmentProfile(id: String) {
+        database.removeCLIEnvironmentProfile(id: id)
+        Task {
+            try? await persistDatabase()
+        }
     }
 
     func shouldOfferRestartCodex(for account: ManagedAccount) -> Bool {
@@ -490,7 +542,11 @@ final class AppViewModel: ObservableObject {
         NSWorkspace.shared.open(paths.paths(for: focusedPlatform).homeURL)
     }
 
-    func openCodexCLI(for account: ManagedAccount, workingDirectoryURL: URL) async {
+    func openCLI(
+        for account: ManagedAccount,
+        environmentProfile: CLIEnvironmentProfile? = nil,
+        workingDirectoryURL: URL
+    ) async {
         guard launchingCLIAccountID == nil else { return }
         launchingCLIAccountID = account.id
         defer {
@@ -499,25 +555,38 @@ final class AppViewModel: ObservableObject {
             }
         }
 
+        let resolvedEnvironment = environmentProfile ?? database.defaultCLIEnvironment(for: account)
+
         do {
-            switch account.platform {
-            case .codex:
-                try await openCodexCLIImpl(for: account, workingDirectoryURL: workingDirectoryURL)
-            case .claude:
-                try await openClaudeCLIImpl(for: account, workingDirectoryURL: workingDirectoryURL)
-            }
-            database.rememberCLIWorkingDirectory(workingDirectoryURL, for: account.id)
+            try await openCLIImpl(
+                for: account,
+                environmentProfile: resolvedEnvironment,
+                workingDirectoryURL: workingDirectoryURL
+            )
+            database.rememberCLILaunch(
+                workingDirectoryURL,
+                environmentProfile: resolvedEnvironment,
+                for: account.id
+            )
             try? await persistDatabase()
-            let successMessage = account.platform == .codex
-                ? L10n.tr("已为账号 %@ 打开 Codex CLI。", account.displayName)
-                : L10n.tr("已为账号 %@ 打开 Claude CLI。", account.displayName)
+            let successMessage = L10n.tr(
+                "已为账号 %@ 打开 %@。",
+                account.displayName,
+                resolvedEnvironment.target.displayName
+            )
             pushBanner(level: .info, message: successMessage)
         } catch {
-            let errorMessage = account.platform == .codex
-                ? L10n.tr("打开 Codex CLI 失败：%@", error.localizedDescription)
-                : L10n.tr("打开 Claude CLI 失败：%@", error.localizedDescription)
+            let errorMessage = L10n.tr(
+                "打开 %@ 失败：%@",
+                resolvedEnvironment.target.displayName,
+                error.localizedDescription
+            )
             pushBanner(level: .error, message: errorMessage)
         }
+    }
+
+    func openCodexCLI(for account: ManagedAccount, workingDirectoryURL: URL) async {
+        await openCLI(for: account, workingDirectoryURL: workingDirectoryURL)
     }
 
     func launchIsolatedCodex(for account: ManagedAccount) async {
@@ -1231,64 +1300,133 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func openCodexCLIImpl(for account: ManagedAccount, workingDirectoryURL: URL) async throws {
-        if account.isActive {
-            try codexCLILauncher.launchCLI(
+    private func openCLIImpl(
+        for account: ManagedAccount,
+        environmentProfile: CLIEnvironmentProfile,
+        workingDirectoryURL: URL
+    ) async throws {
+        switch environmentProfile.target {
+        case .codex:
+            let context = try await resolveCodexLaunchContext(
                 for: account,
-                mode: .globalCurrentAuth,
-                workingDirectoryURL: workingDirectoryURL,
-                appSupportDirectoryURL: paths.appSupportDirectoryURL
+                environmentProfile: environmentProfile,
+                workingDirectoryURL: workingDirectoryURL
             )
-            return
+            try codexCLILauncher.launchCLI(context: context)
+        case .claude:
+            let context = try await resolveClaudeLaunchContext(
+                for: account,
+                environmentProfile: environmentProfile,
+                workingDirectoryURL: workingDirectoryURL
+            )
+            try claudeCLILauncher.launchCLI(context: context)
         }
+    }
 
-        let cachedPayload = try latestCodexPayloadForRefresh(for: account)
-        var payload = cachedPayload
+    private func resolveCodexLaunchContext(
+        for account: ManagedAccount,
+        environmentProfile: CLIEnvironmentProfile,
+        workingDirectoryURL: URL
+    ) async throws -> ResolvedCodexCLILaunchContext {
+        let configuration = environmentProfile.resolvedCodex
+        let shouldUseAccountCredentials = account.platform == .codex && configuration.useAccountCredentials
 
-        if payload.authMode == .chatgpt {
-            do {
-                let refreshed = try await oauthClient.refreshAuth(using: payload)
-                payload = refreshed.payload
-                try credentialStore.save(.codex(refreshed.payload), for: account.id)
-                let refreshedAccount = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: false)
-                database.appendLog(level: .info, message: L10n.tr("打开 CLI 前已在线刷新账号 %@ 的凭据。", refreshedAccount.displayName))
-                try? await persistDatabase()
-            } catch {
-                database.appendLog(level: .warning, message: L10n.tr("打开 CLI 前在线刷新账号 %@ 失败，已回退当前本地凭据：%@", account.displayName, error.localizedDescription))
-                try? await persistDatabase()
+        var payload: CodexAuthPayload?
+        if shouldUseAccountCredentials {
+            if account.isActive,
+               let currentPayload = try authFileManager.readCurrentAuth(),
+               currentPayload.accountIdentifier == account.accountIdentifier
+            {
+                payload = currentPayload
+                try credentialStore.save(.codex(currentPayload), for: account.id)
+            } else {
+                payload = try latestCodexPayloadForRefresh(for: account)
+            }
+
+            if let resolvedPayload = payload, resolvedPayload.authMode == .chatgpt, (!account.isActive || configuration.requiresConfigFile) {
+                do {
+                    let refreshed = try await oauthClient.refreshAuth(using: resolvedPayload)
+                    payload = refreshed.payload
+                    try credentialStore.save(.codex(refreshed.payload), for: account.id)
+                    let refreshedAccount = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: account.isActive)
+                    database.appendLog(level: .info, message: L10n.tr("打开 CLI 前已在线刷新账号 %@ 的凭据。", refreshedAccount.displayName))
+                    try? await persistDatabase()
+                } catch {
+                    database.appendLog(level: .warning, message: L10n.tr("打开 CLI 前在线刷新账号 %@ 失败，已回退当前本地凭据：%@", account.displayName, error.localizedDescription))
+                    try? await persistDatabase()
+                }
             }
         }
 
-        try codexCLILauncher.launchCLI(
+        return try cliEnvironmentResolver.resolveCodexContext(
             for: account,
-            mode: .isolatedAccount(payload: payload),
+            environmentProfile: environmentProfile,
             workingDirectoryURL: workingDirectoryURL,
-            appSupportDirectoryURL: paths.appSupportDirectoryURL
+            appPaths: paths,
+            authPayload: payload
         )
     }
 
-    private func openClaudeCLIImpl(for account: ManagedAccount, workingDirectoryURL: URL) async throws {
-        let credential = try latestCredential(for: account)
+    private func resolveClaudeLaunchContext(
+        for account: ManagedAccount,
+        environmentProfile: CLIEnvironmentProfile,
+        workingDirectoryURL: URL
+    ) async throws -> ResolvedClaudeCLILaunchContext {
+        let configuration = environmentProfile.resolvedClaude
+        let shouldUseAccountCredentials = account.platform == .claude && configuration.usesAccountCredentials
+        let credential = shouldUseAccountCredentials ? try latestCredential(for: account) : nil
+        let codexAuthPayload = try await latestCodexPayloadForClaudeLaunch(for: account)
 
-        switch credential {
-        case let .claudeProfile(snapshotRef):
-            let mode: ClaudeCLILaunchMode
-            if account.isActive {
-                mode = .globalProfile
-            } else {
-                let rootURL = try claudeProfileManager.prepareIsolatedProfileRoot(for: account.id, snapshotRef: snapshotRef)
-                mode = .isolatedProfile(rootURL: rootURL)
-            }
-            try claudeCLILauncher.launchCLI(for: account, mode: mode, workingDirectoryURL: workingDirectoryURL)
-        case let .anthropicAPIKey(apiKeyCredential):
-            let rootURL = try claudeProfileManager.prepareIsolatedAPIKeyRoot(for: account.id)
-            try claudeCLILauncher.launchCLI(
-                for: account,
-                mode: .anthropicAPIKey(rootURL: rootURL, credential: apiKeyCredential),
-                workingDirectoryURL: workingDirectoryURL
-            )
-        case .codex:
-            throw CredentialStoreError.unexpectedData
+        return try await cliEnvironmentResolver.resolveClaudeContext(
+            for: account,
+            environmentProfile: environmentProfile,
+            allEnvironmentProfiles: database.cliEnvironmentProfiles,
+            preferredCodexEnvironmentID: database.preferredCodexEnvironmentID(for: account.id),
+            workingDirectoryURL: workingDirectoryURL,
+            appPaths: paths,
+            codexAuthPayload: codexAuthPayload,
+            credential: credential,
+            claudeProfileManager: claudeProfileManager,
+            claudePatchedRuntimeManager: claudePatchedRuntimeManager,
+            codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager
+        )
+    }
+
+    private func latestCodexPayloadForClaudeLaunch(for account: ManagedAccount) async throws -> CodexAuthPayload? {
+        guard account.platform == .codex else {
+            return nil
+        }
+
+        var payload: CodexAuthPayload?
+        if account.isActive,
+           let currentPayload = try authFileManager.readCurrentAuth(),
+           currentPayload.accountIdentifier == account.accountIdentifier
+        {
+            payload = currentPayload
+            try credentialStore.save(.codex(currentPayload), for: account.id)
+        } else {
+            payload = try latestCodexPayloadForRefresh(for: account)
+        }
+
+        guard let payload else {
+            return nil
+        }
+
+        guard payload.authMode == .chatgpt, !account.isActive else {
+            return payload
+        }
+
+        do {
+            let refreshed = try await oauthClient.refreshAuth(using: payload)
+            try credentialStore.save(.codex(refreshed.payload), for: account.id)
+            let refreshedAccount = upsertAccount(identity: refreshed.identity, payload: refreshed.payload, makeActive: account.isActive)
+            database.appendLog(level: .info, message: L10n.tr("打开 Claude Code 前已在线刷新账号 %@ 的凭据。", refreshedAccount.displayName))
+            try? await persistDatabase()
+            return refreshed.payload
+        } catch {
+            database.appendLog(level: .warning, message: L10n.tr("打开 Claude Code 前在线刷新账号 %@ 失败，已回退当前本地凭据：%@", account.displayName, error.localizedDescription))
+            try? await persistDatabase()
+            return payload
         }
     }
 

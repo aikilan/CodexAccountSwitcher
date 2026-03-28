@@ -5,8 +5,8 @@ import XCTest
 final class CodexCLILauncherTests: XCTestCase {
     func testLaunchCLIGlobalModeRunsPlainCodexCommand() throws {
         let fileManager = FileManager.default
-        let appSupport = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
 
         var capturedLines: [String] = []
         let launcher = CodexCLILauncher(
@@ -15,13 +15,19 @@ final class CodexCLILauncherTests: XCTestCase {
                 capturedLines = lines
             }
         )
-        let workingDirectoryURL = appSupport.appendingPathComponent("workspace", isDirectory: true)
+        let workingDirectoryURL = rootURL.appendingPathComponent("workspace", isDirectory: true)
 
         try launcher.launchCLI(
-            for: makeAccount(),
-            mode: .globalCurrentAuth,
-            workingDirectoryURL: workingDirectoryURL,
-            appSupportDirectoryURL: appSupport
+            context: ResolvedCodexCLILaunchContext(
+                accountID: UUID(),
+                workingDirectoryURL: workingDirectoryURL,
+                mode: .globalCurrentAuth,
+                codexHomeURL: nil,
+                authPayload: nil,
+                configFileContents: nil,
+                environmentVariables: [:],
+                arguments: []
+            )
         )
 
         XCTAssertEqual(
@@ -37,8 +43,8 @@ final class CodexCLILauncherTests: XCTestCase {
 
     func testLaunchCLIIsolatedModeWritesAuthAndRunsWithIsolatedCodexHome() throws {
         let fileManager = FileManager.default
-        let appSupport = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
 
         var capturedLines: [String] = []
         let launcher = CodexCLILauncher(
@@ -47,19 +53,21 @@ final class CodexCLILauncherTests: XCTestCase {
                 capturedLines = lines
             }
         )
-        let account = makeAccount()
         let payload = makePayload(accountID: "acct_cli", refreshToken: "refresh_cli")
-        let workingDirectoryURL = appSupport.appendingPathComponent("workspace", isDirectory: true)
-        let codexHomeURL = appSupport
-            .appendingPathComponent("isolated-codex-instances", isDirectory: true)
-            .appendingPathComponent(account.id.uuidString, isDirectory: true)
-            .appendingPathComponent("codex-home", isDirectory: true)
+        let workingDirectoryURL = rootURL.appendingPathComponent("workspace", isDirectory: true)
+        let codexHomeURL = rootURL.appendingPathComponent("codex-home", isDirectory: true)
 
         try launcher.launchCLI(
-            for: account,
-            mode: .isolatedAccount(payload: payload),
-            workingDirectoryURL: workingDirectoryURL,
-            appSupportDirectoryURL: appSupport
+            context: ResolvedCodexCLILaunchContext(
+                accountID: UUID(),
+                workingDirectoryURL: workingDirectoryURL,
+                mode: .isolated,
+                codexHomeURL: codexHomeURL,
+                authPayload: payload,
+                configFileContents: "model = \"gpt-5.4\"\n",
+                environmentVariables: ["OPENROUTER_API_KEY": "sk-or-test"],
+                arguments: []
+            )
         )
 
         let savedPayload = try XCTUnwrap(
@@ -67,11 +75,15 @@ final class CodexCLILauncherTests: XCTestCase {
         )
         XCTAssertEqual(savedPayload, payload)
         XCTAssertEqual(
+            try String(contentsOf: codexHomeURL.appendingPathComponent("config.toml")),
+            "model = \"gpt-5.4\"\n"
+        )
+        XCTAssertEqual(
             capturedLines,
             [
                 "tell application \"Terminal\"",
                 "activate",
-                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && env CODEX_HOME=\\\"\(codexHomeURL.path)\\\" codex\"",
+                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && env CODEX_HOME=\\\"\(codexHomeURL.path)\\\" OPENROUTER_API_KEY=\\\"sk-or-test\\\" codex\"",
                 "end tell",
             ]
         )
@@ -89,33 +101,20 @@ final class CodexCLILauncherTests: XCTestCase {
 
         XCTAssertThrowsError(
             try launcher.launchCLI(
-                for: makeAccount(),
-                mode: .globalCurrentAuth,
-                workingDirectoryURL: appSupport,
-                appSupportDirectoryURL: appSupport
+                context: ResolvedCodexCLILaunchContext(
+                    accountID: UUID(),
+                    workingDirectoryURL: appSupport,
+                    mode: .globalCurrentAuth,
+                    codexHomeURL: nil,
+                    authPayload: nil,
+                    configFileContents: nil,
+                    environmentVariables: [:],
+                    arguments: []
+                )
             )
         ) { error in
             XCTAssertEqual(error as? TestError, .appleScriptFailed)
         }
-    }
-
-    private func makeAccount() -> ManagedAccount {
-        ManagedAccount(
-            id: UUID(),
-            codexAccountID: "acct_cli",
-            displayName: "CLI User",
-            email: "cli@example.com",
-            authMode: .chatgpt,
-            createdAt: Date(),
-            lastUsedAt: nil,
-            lastQuotaSnapshotAt: nil,
-            lastRefreshAt: nil,
-            planType: nil,
-            lastStatusCheckAt: nil,
-            lastStatusMessage: nil,
-            lastStatusLevel: nil,
-            isActive: false
-        )
     }
 
     private func makePayload(accountID: String, refreshToken: String) -> CodexAuthPayload {

@@ -23,34 +23,28 @@ struct ClaudeCLILauncher {
         self.runAppleScript = runAppleScript
     }
 
-    func launchCLI(
-        for account: ManagedAccount,
-        mode: ClaudeCLILaunchMode,
-        workingDirectoryURL: URL
-    ) throws {
-        let command: String
-        let prefix = "cd \(shellQuoted(workingDirectoryURL.standardizedFileURL.path)) && "
-        let executable = resolvedExecutable()
+    func launchCLI(context: ResolvedClaudeCLILaunchContext) throws {
+        let command = try command(for: context)
+        try runAppleScript(appleScriptLines(for: command))
+    }
 
-        switch mode {
-        case .globalProfile:
-            command = prefix + executable
-        case let .isolatedProfile(rootURL):
-            let configURL = rootURL.appendingPathComponent(".claude", isDirectory: true)
-            command = prefix
-                + "env HOME=\(shellQuoted(rootURL.path)) "
-                + "CLAUDE_CONFIG_DIR=\(shellQuoted(configURL.path)) "
-                + executable
-        case let .anthropicAPIKey(rootURL, credential):
-            let configURL = rootURL.appendingPathComponent(".claude", isDirectory: true)
-            command = prefix
-                + "env HOME=\(shellQuoted(rootURL.path)) "
-                + "CLAUDE_CONFIG_DIR=\(shellQuoted(configURL.path)) "
-                + "ANTHROPIC_API_KEY=\(shellQuoted(credential.apiKey)) "
-                + executable
+    private func command(for context: ResolvedClaudeCLILaunchContext) throws -> String {
+        let prefix = "cd \(shellQuoted(context.workingDirectoryURL.standardizedFileURL.path)) && "
+        let executable = context.patchedExecutableURL.map { shellQuoted($0.path) } ?? resolvedExecutable()
+        let executableCommand = ([executable] + context.arguments.map(shellQuoted)).joined(separator: " ")
+
+        var environmentVariables = context.environmentVariables
+
+        if let rootURL = context.rootURL {
+            try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+            environmentVariables["HOME"] = rootURL.path
+        }
+        if let configDirectoryURL = context.configDirectoryURL {
+            try fileManager.createDirectory(at: configDirectoryURL, withIntermediateDirectories: true)
+            environmentVariables["CLAUDE_CONFIG_DIR"] = configDirectoryURL.path
         }
 
-        try runAppleScript(appleScriptLines(for: command))
+        return prefix + envCommand(environmentVariables: environmentVariables, executable: executableCommand)
     }
 
     private func resolvedExecutable() -> String {
@@ -64,6 +58,17 @@ struct ClaudeCLILauncher {
         }
 
         return "claude"
+    }
+
+    private func envCommand(environmentVariables: [String: String], executable: String) -> String {
+        let prefixes = environmentVariables
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(shellQuoted($0.value))" }
+            .joined(separator: " ")
+        if prefixes.isEmpty {
+            return executable
+        }
+        return "env \(prefixes) \(executable)"
     }
 
     private func appleScriptLines(for command: String) -> [String] {

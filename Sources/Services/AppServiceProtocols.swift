@@ -38,6 +38,27 @@ protocol ClaudeAPIClienting: Sendable {
     func probeStatus(using credential: AnthropicAPIKeyCredential) async throws -> ClaudeRateLimitSnapshot
 }
 
+protocol ClaudePatchedRuntimeManaging: Sendable {
+    func preparePatchedRuntime(
+        model: String,
+        appSupportDirectoryURL: URL
+    ) throws -> URL
+}
+
+struct PreparedCodexOAuthClaudeBridge: Equatable, Sendable {
+    let baseURL: String
+    let apiKeyEnvName: String
+    let apiKey: String
+}
+
+protocol CodexOAuthClaudeBridgeManaging: Sendable {
+    func prepareBridge(
+        accountID: UUID,
+        payload: CodexAuthPayload,
+        model: String
+    ) async throws -> PreparedCodexOAuthClaudeBridge
+}
+
 protocol QuotaMonitoring: AnyObject {
     func bootstrapSnapshot() -> QuotaSnapshot?
     func start(
@@ -62,9 +83,28 @@ protocol CodexRuntimeInspecting: Sendable {
     func restartCodex() async throws
 }
 
-enum CodexCLILaunchMode: Equatable, Sendable {
-    case globalCurrentAuth
-    case isolatedAccount(payload: CodexAuthPayload)
+protocol CLIEnvironmentResolving: Sendable {
+    func resolveCodexContext(
+        for account: ManagedAccount,
+        environmentProfile: CLIEnvironmentProfile,
+        workingDirectoryURL: URL,
+        appPaths: AppPaths,
+        authPayload: CodexAuthPayload?
+    ) throws -> ResolvedCodexCLILaunchContext
+
+    func resolveClaudeContext(
+        for account: ManagedAccount,
+        environmentProfile: CLIEnvironmentProfile,
+        allEnvironmentProfiles: [CLIEnvironmentProfile],
+        preferredCodexEnvironmentID: String?,
+        workingDirectoryURL: URL,
+        appPaths: AppPaths,
+        codexAuthPayload: CodexAuthPayload?,
+        credential: StoredCredential?,
+        claudeProfileManager: any ClaudeProfileManaging,
+        claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
+    ) async throws -> ResolvedClaudeCLILaunchContext
 }
 
 struct IsolatedCodexLaunchPaths: Equatable, Sendable {
@@ -82,24 +122,9 @@ protocol CodexInstanceLaunching {
 }
 
 protocol CodexCLILaunching {
-    func launchCLI(
-        for account: ManagedAccount,
-        mode: CodexCLILaunchMode,
-        workingDirectoryURL: URL,
-        appSupportDirectoryURL: URL
-    ) throws
-}
-
-enum ClaudeCLILaunchMode: Equatable, Sendable {
-    case globalProfile
-    case isolatedProfile(rootURL: URL)
-    case anthropicAPIKey(rootURL: URL, credential: AnthropicAPIKeyCredential)
+    func launchCLI(context: ResolvedCodexCLILaunchContext) throws
 }
 
 protocol ClaudeCLILaunching {
-    func launchCLI(
-        for account: ManagedAccount,
-        mode: ClaudeCLILaunchMode,
-        workingDirectoryURL: URL
-    ) throws
+    func launchCLI(context: ResolvedClaudeCLILaunchContext) throws
 }
