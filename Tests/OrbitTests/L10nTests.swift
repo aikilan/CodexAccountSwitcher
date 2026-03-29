@@ -49,6 +49,18 @@ final class L10nTests: XCTestCase {
         )
     }
 
+    func testCLILaunchCardStringsAreLocalizedInEnglish() {
+        let originalPreference = L10n.currentLanguagePreference
+        defer {
+            L10n.setLanguagePreference(originalPreference)
+        }
+
+        L10n.setLanguagePreference(.english)
+        XCTAssertEqual(L10n.tr("最近目录"), "Recent Directories")
+        XCTAssertEqual(L10n.tr("选择目录并打开 %@", "Claude Code"), "Choose Directory and Open Claude Code")
+        XCTAssertEqual(L10n.tr("先选择一个目录打开 %@，后续会在这里快速重开。", "Codex CLI"), "Choose a directory to open Codex CLI first. You can relaunch it here later.")
+    }
+
     func testResourceBundleResolvesFromPackagedAppResourcesDirectory() throws {
         let fileManager = FileManager.default
         let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

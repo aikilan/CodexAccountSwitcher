@@ -158,6 +158,7 @@
 "最后使用" = "Last Used";
 "最后刷新" = "Last Refreshed";
 "最近结果" = "Latest Result";
+"最近目录" = "Recent Directories";
 "未知" = "Unknown";
 "未知错误" = "Unknown error";
 "未能自动接收浏览器回调。你可以改为手动粘贴 redirect URL 或 code。" = "The browser callback was not received automatically. You can paste the redirect URL or code manually instead.";
@@ -178,6 +179,7 @@
 "正在准备浏览器 OAuth。" = "Preparing browser OAuth.";
 "正在切换账号..." = "Switching account...";
 "正在刷新账号状态..." = "Refreshing account statuses...";
+"正在打开 %@..." = "Opening %@...";
 "正在启动独立实例..." = "Launching isolated instance...";
 "正在打开 CLI..." = "Opening CLI...";
 "正在接入 API Key。" = "Setting up API Key.";
@@ -244,13 +246,16 @@
 "输入 OPENAI_API_KEY" = "Enter OPENAI_API_KEY";
 "运行态信号" = "Runtime Signal";
 "还没有打开过目录。先选择一个目录打开 CLI，后续就能从这里快速启动。" = "No directories have been opened yet. Choose a directory to open CLI first, then you can relaunch quickly from here.";
+"先选择一个目录打开 %@，后续会在这里快速重开。" = "Choose a directory to open %@ first. You can relaunch it here later.";
 "还没有账号" = "No Accounts Yet";
 "这个账号还没有被可靠归档的本地额度快照。切换到该账号并实际使用一段时间后，应用会从本地会话事件中抓取额度。" = "There is no reliably archived local quota snapshot for this account yet. After switching to this account and using it for a while, the app will capture quota data from local session events.";
 "退出应用" = "Quit App";
 "选择一个目录作为 Codex CLI 的启动目录。" = "Choose a directory to use as the startup directory for Codex CLI.";
 "选择浏览器登录或 API Key 接入方式。" = "Choose browser sign-in or API Key setup.";
 "选择账号接入方式。" = "Choose how to add the account.";
+"选择目录并打开 %@" = "Choose Directory and Open %@";
 "选择目录并打开 CLI" = "Choose Directory and Open CLI";
+"浏览其他目录..." = "Browse Another Directory...";
 "通过 Terminal 打开 Codex CLI 失败：%@" = "Failed to open Codex CLI via Terminal: %@";
 "通过浏览器登录 ChatGPT 账号，后续可以直接打开 Codex CLI 或 Claude Code。" = "Sign in with a ChatGPT account in the browser. You can then open Codex CLI or Claude Code directly.";
 "邮箱" = "Email";

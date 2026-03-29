@@ -416,41 +416,37 @@ private struct AccountDetailView: View {
 
     var body: some View {
         ScrollView {
-            HStack(alignment: .top, spacing: 24) {
-                VStack(alignment: .leading, spacing: 24) {
-                    quickActionSection
+            VStack(alignment: .leading, spacing: 24) {
+                quickActionSection
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(L10n.tr("账号详情"))
-                            .font(.largeTitle.bold())
+                secondaryActionSection
 
-                        HStack(alignment: .center, spacing: 12) {
-                            TextField(L10n.tr("显示名"), text: $draftName)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(maxWidth: 280)
-                            Button(L10n.tr("保存名称")) {
-                                onRename(draftName)
-                            }
-                            .buttonStyle(.bordered)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L10n.tr("账号详情"))
+                        .font(.largeTitle.bold())
+
+                    HStack(alignment: .center, spacing: 12) {
+                        TextField(L10n.tr("显示名"), text: $draftName)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 280)
+                        Button(L10n.tr("保存名称")) {
+                            onRename(draftName)
                         }
-
-                        infoGrid
+                        .buttonStyle(.bordered)
                     }
-                    .padding(24)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                    quotaSection
-
-                    statusSection
-
-                    pathSection
-
-                    deleteSection
+                    infoGrid
                 }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(24)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                cliDirectoryHistorySection
-                    .frame(width: 320, alignment: .topLeading)
+                quotaSection
+
+                statusSection
+
+                pathSection
+
+                deleteSection
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .padding(24)
@@ -615,69 +611,12 @@ private struct AccountDetailView: View {
     }
 
     private var quickActionSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(L10n.tr("快捷操作"))
-                .font(.title2.bold())
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .center, spacing: 16) {
+                Text(L10n.tr("打开 CLI"))
+                    .font(.title2.bold())
 
-            HStack {
-                Button(model.isRefreshingStatus(for: account.id) ? L10n.tr("正在更新状态...") : L10n.tr("手动更新状态")) {
-                    onRefreshStatus()
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.isRefreshingStatus(for: account.id) || model.isRefreshingAllStatuses || model.isSwitchInProgress)
-
-                Button(switchButtonTitle) {
-                    onSwitch()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
-
-                if model.canEditProviderAccount(account) {
-                    Button(L10n.tr("编辑供应商")) {
-                        onEditProvider()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
-                }
-
-                if account.providerRule == .chatgptOAuth {
-                    Button(isolatedInstanceButtonTitle) {
-                        Task { await model.launchIsolatedCodex(for: account) }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(
-                        !model.canLaunchIsolatedCodex(for: account)
-                            || model.isLaunchingIsolatedInstance(for: account.id)
-                            || model.isLaunchingCLI(for: account.id)
-                            || model.isSwitchInProgress
-                    )
-                }
-
-                Button(model.isLaunchingCLI(for: account.id) ? L10n.tr("正在打开 CLI...") : L10n.tr("选择目录并打开 CLI")) {
-                    chooseDirectoryAndOpenCLI()
-                }
-                .buttonStyle(.bordered)
-                .disabled(
-                    model.isRefreshingStatus(for: account.id)
-                        || model.isRefreshingAllStatuses
-                        || model.isLaunchingCLI(for: account.id)
-                        || model.isLaunchingIsolatedInstance(for: account.id)
-                        || model.isSwitchInProgress
-                )
-
-                if model.shouldOfferRestartCodex(for: account) {
-                    Button(model.isRestartingCodex ? L10n.tr("正在重启 Codex...") : L10n.tr("重启 Codex")) {
-                        Task { await model.performBannerAction(.restartCodex) }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isRestartingCodex)
-                }
-            }
-
-            HStack(alignment: .center, spacing: 12) {
-                Text(L10n.tr("默认启动目标"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 12)
 
                 Picker(
                     L10n.tr("默认启动目标"),
@@ -691,47 +630,113 @@ private struct AccountDetailView: View {
                             .tag(target)
                     }
                 }
-                .frame(maxWidth: 240)
+                .labelsHidden()
+                .frame(width: 220)
             }
+
+            Button {
+                chooseDirectoryAndOpenCLI()
+            } label: {
+                HStack(spacing: 10) {
+                    Text(primaryCLILaunchButtonTitle)
+                        .font(.headline)
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "folder.badge.plus")
+                        .font(.callout.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(isCLIActionDisabled)
 
             Text(cliLaunchHelpText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text(L10n.tr("最近目录"))
+                    .font(.headline)
+
+                if recentCLILaunches.isEmpty {
+                    Text(L10n.tr("先选择一个目录打开 %@，后续会在这里快速重开。", selectedCLITarget.displayName))
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(recentCLILaunches) { record in
+                            CLIDirectoryHistoryCard(
+                                record: record,
+                                isDisabled: isCLIActionDisabled,
+                                onOpen: {
+                                    launchCLI(record: record)
+                                },
+                                onDelete: {
+                                    model.deleteCLILaunchRecord(record.id, for: account.id)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Button(L10n.tr("浏览其他目录...")) {
+                    chooseDirectoryAndOpenCLI()
+                }
+                .buttonStyle(.plain)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+                .disabled(isCLIActionDisabled)
+            }
+
+            if shouldShowIsolatedInstanceAction {
+                Button(isolatedInstanceButtonTitle) {
+                    Task { await model.launchIsolatedCodex(for: account) }
+                }
+                .buttonStyle(.plain)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .disabled(isIsolatedInstanceActionDisabled)
+            }
         }
         .padding(20)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private var cliDirectoryHistorySection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(L10n.tr("已打开目录"))
-                .font(.title2.bold())
+    private var secondaryActionSection: some View {
+        HStack(spacing: 12) {
+            Button(model.isRefreshingStatus(for: account.id) ? L10n.tr("正在更新状态...") : L10n.tr("手动更新状态")) {
+                onRefreshStatus()
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.isRefreshingStatus(for: account.id) || model.isRefreshingAllStatuses || model.isSwitchInProgress)
 
-            if recentCLILaunches.isEmpty {
-                Text(L10n.tr("还没有打开过目录。先选择一个目录打开 CLI，后续就能从这里快速启动。"))
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(recentCLILaunches) { record in
-                        CLIDirectoryHistoryCard(
-                            record: record,
-                            isDisabled: model.isLaunchingCLI(for: account.id)
-                                || model.isLaunchingIsolatedInstance(for: account.id)
-                                || model.isSwitchInProgress,
-                            onOpen: {
-                                launchCLI(record: record)
-                            },
-                            onDelete: {
-                                model.deleteCLILaunchRecord(record.id, for: account.id)
-                            }
-                        )
-                    }
+            Button(switchButtonTitle) {
+                onSwitch()
+            }
+            .buttonStyle(.bordered)
+            .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+
+            if model.canEditProviderAccount(account) {
+                Button(L10n.tr("编辑供应商")) {
+                    onEditProvider()
                 }
+                .buttonStyle(.bordered)
+                .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+            }
+
+            if model.shouldOfferRestartCodex(for: account) {
+                Button(model.isRestartingCodex ? L10n.tr("正在重启 Codex...") : L10n.tr("重启 Codex")) {
+                    Task { await model.performBannerAction(.restartCodex) }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isRestartingCodex)
             }
         }
-        .padding(20)
-        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var deleteSection: some View {
@@ -809,7 +814,42 @@ private struct AccountDetailView: View {
     }
 
     private var recentCLILaunches: [CLILaunchRecord] {
-        model.cliLaunchHistory(for: account.id)
+        Array(
+            model.cliLaunchHistory(for: account.id)
+                .filter { $0.target == selectedCLITarget }
+                .prefix(4)
+        )
+    }
+
+    private var primaryCLILaunchButtonTitle: String {
+        if model.isLaunchingCLI(for: account.id) {
+            return L10n.tr("正在打开 %@...", selectedCLITarget.displayName)
+        }
+        return L10n.tr("选择目录并打开 %@", selectedCLITarget.displayName)
+    }
+
+    private var isCLIActionDisabled: Bool {
+        model.isRefreshingStatus(for: account.id)
+            || model.isRefreshingAllStatuses
+            || model.isLaunchingCLI(for: account.id)
+            || model.isLaunchingIsolatedInstance(for: account.id)
+            || model.isSwitchInProgress
+    }
+
+    private var shouldShowIsolatedInstanceAction: Bool {
+        account.providerRule == .chatgptOAuth
+            && (
+                model.canLaunchIsolatedCodex(for: account)
+                    || model.isLaunchingIsolatedInstance(for: account.id)
+                    || model.hasLaunchedIsolatedInstance(for: account.id)
+            )
+    }
+
+    private var isIsolatedInstanceActionDisabled: Bool {
+        !model.canLaunchIsolatedCodex(for: account)
+            || model.isLaunchingIsolatedInstance(for: account.id)
+            || model.isLaunchingCLI(for: account.id)
+            || model.isSwitchInProgress
     }
 
     private func chooseDirectoryAndOpenCLI() {
@@ -838,7 +878,7 @@ private struct AccountDetailView: View {
         Task {
             await model.openCLI(
                 for: account,
-                target: record.target,
+                target: selectedCLITarget,
                 workingDirectoryURL: URL(fileURLWithPath: record.path, isDirectory: true)
             )
         }
@@ -912,15 +952,6 @@ private struct CLIDirectoryHistoryCard: View {
                         Text(L10n.tr("点击启动 CLI"))
                             .font(.caption.weight(.medium))
                             .foregroundStyle(isDisabled ? .tertiary : .secondary)
-                    }
-
-                    HStack(spacing: 8) {
-                        Text(record.target.displayName)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.accentColor.opacity(0.12), in: Capsule())
                     }
 
                     Text(record.path)
