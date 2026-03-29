@@ -131,13 +131,35 @@ struct CodexCLILauncher {
             let modelCatalogURL = codexHomeURL.appendingPathComponent(Self.managedModelCatalogFileName)
             let catalogContents = try modelCatalogContents(from: snapshot)
             try catalogContents.write(to: modelCatalogURL, atomically: true, encoding: .utf8)
-            if !configContents.isEmpty, !configContents.hasSuffix("\n") {
-                configContents.append("\n")
-            }
-            configContents.append("model_catalog_json = \"\(tomlEscaped(modelCatalogURL.path))\"\n")
+            configContents = insertingRootConfigEntry(
+                "model_catalog_json = \"\(tomlEscaped(modelCatalogURL.path))\"",
+                into: configContents
+            )
         }
 
         return configContents.isEmpty ? nil : configContents
+    }
+
+    private func insertingRootConfigEntry(_ entry: String, into configContents: String) -> String {
+        guard !configContents.isEmpty else {
+            return entry + "\n"
+        }
+
+        if let firstTableRange = configContents.range(of: #"(?m)^\["#, options: .regularExpression) {
+            let prefix = String(configContents[..<firstTableRange.lowerBound])
+                .trimmingCharacters(in: .newlines)
+            let suffix = String(configContents[firstTableRange.lowerBound...])
+            if prefix.isEmpty {
+                return entry + "\n\n" + suffix
+            }
+            return prefix + "\n" + entry + "\n\n" + suffix
+        }
+
+        let trimmedConfigContents = configContents.trimmingCharacters(in: .newlines)
+        if trimmedConfigContents.isEmpty {
+            return entry + "\n"
+        }
+        return trimmedConfigContents + "\n" + entry + "\n"
     }
 
     private func modelCatalogContents(from snapshot: ResolvedCodexModelCatalogSnapshot) throws -> String {

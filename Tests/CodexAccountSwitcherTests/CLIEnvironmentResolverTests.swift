@@ -131,6 +131,67 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         XCTAssertEqual(snapshot, ["gpt-5.4"])
     }
 
+    func testResolveClaudeContextPrefetchesModelsForAllBuiltInClaudePresets() async throws {
+        let recorder = RequestRecorder<URLRequest>()
+        ResolverMockURLProtocol.requestHandler = { request in
+            recorder.append(request)
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[{"id":"prefetched-model"}]}"#.utf8))
+        }
+
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let paths = try makePaths()
+        let presets = ProviderCatalog.presets(for: .claudeCompatible).filter { !$0.isCustom }
+
+        for preset in presets {
+            let account = makeProviderAccount(
+                platform: .claude,
+                rule: .claudeCompatible,
+                presetID: preset.id,
+                baseURL: preset.baseURL,
+                envName: preset.apiKeyEnvName,
+                model: preset.defaultModel
+            )
+
+            let context = try await resolver.resolveClaudeContext(
+                for: account,
+                workingDirectoryURL: FileManager.default.temporaryDirectory,
+                appPaths: paths,
+                codexAuthPayload: nil,
+                credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "key-\(preset.id)").validated()),
+                claudeProfileManager: ResolverClaudeProfileManager(),
+                claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+                codexOAuthClaudeBridgeManager: RecordingResolverCodexOAuthClaudeBridgeManager()
+            )
+
+            XCTAssertEqual(context.providerSnapshot?.availableModels, ["prefetched-model", preset.defaultModel], "preset=\(preset.id)")
+        }
+
+        let requests = recorder.values()
+        XCTAssertEqual(requests.count, presets.count)
+
+        for (request, preset) in zip(requests, presets) {
+            XCTAssertEqual(request.httpMethod, "GET", "preset=\(preset.id)")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json", "preset=\(preset.id)")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2023-06-01", "preset=\(preset.id)")
+
+            if let normalizedBaseURL = normalizedMiniMaxAnthropicBaseURL(preset.baseURL, includeVersion: true) {
+                XCTAssertEqual(request.url?.absoluteString, "\(normalizedBaseURL)/models", "preset=\(preset.id)")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer key-\(preset.id)", "preset=\(preset.id)")
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-api-key"), "preset=\(preset.id)")
+            } else {
+                XCTAssertEqual(request.url?.absoluteString, "\(preset.baseURL)/models", "preset=\(preset.id)")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "key-\(preset.id)", "preset=\(preset.id)")
+                XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"), "preset=\(preset.id)")
+            }
+        }
+    }
+
     func testResolveClaudeContextUsesCodexModelCatalogForChatGPTOAuthBridge() async throws {
         let resolver = CLIEnvironmentResolver(session: makeSession())
         let bridgeManager = RecordingResolverCodexOAuthClaudeBridgeManager()
@@ -220,6 +281,94 @@ final class CLIEnvironmentResolverTests: XCTestCase {
 
         let snapshot = await bridgeManager.snapshot()
         XCTAssertEqual(snapshot, ["MiniMax-M2.7"])
+    }
+
+    func testResolveCodexContextManagesModelCatalogForCustomProviderNamedOpenAI() async throws {
+        ResolverMockURLProtocol.requestHandler = { _ in
+            XCTFail("custom provider 不应该触发模型预查询")
+            let response = HTTPURLResponse(
+                url: URL(string: "https://example.com")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[]}"#.utf8))
+        }
+
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let paths = try makePaths()
+        let account = ManagedAccount(
+            id: UUID(),
+            platform: .codex,
+            accountIdentifier: UUID().uuidString,
+            displayName: "Provider",
+            email: "sk-***",
+            authKind: .providerAPIKey,
+            providerRule: .openAICompatible,
+            providerPresetID: ProviderCatalog.customPresetID,
+            providerDisplayName: "OpenAI",
+            providerBaseURL: "https://example.com/v1",
+            providerAPIKeyEnvName: "OPENAI_API_KEY",
+            defaultModel: "custom-model",
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+
+        let context = try await resolver.resolveCodexContext(
+            for: account,
+            workingDirectoryURL: FileManager.default.temporaryDirectory,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-custom-openai").validated(),
+            openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
+            claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
+        )
+
+        XCTAssertEqual(context.modelCatalogSnapshot?.availableModels, ["custom-model"])
+    }
+
+    func testResolveClaudeContextSkipsPrefetchForCustomClaudeProvider() async throws {
+        ResolverMockURLProtocol.requestHandler = { _ in
+            XCTFail("custom provider 不应该触发模型预查询")
+            let response = HTTPURLResponse(
+                url: URL(string: "https://example.com")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[]}"#.utf8))
+        }
+
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let paths = try makePaths()
+        let account = makeProviderAccount(
+            platform: .claude,
+            rule: .claudeCompatible,
+            presetID: ProviderCatalog.customPresetID,
+            baseURL: "https://api.minimax.io/anthropic/v1",
+            envName: "MINIMAX_API_KEY",
+            model: "MiniMax-M2.7"
+        )
+
+        let context = try await resolver.resolveClaudeContext(
+            for: account,
+            workingDirectoryURL: FileManager.default.temporaryDirectory,
+            appPaths: paths,
+            codexAuthPayload: nil,
+            credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "sk-minimax-test").validated()),
+            claudeProfileManager: ResolverClaudeProfileManager(),
+            claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+            codexOAuthClaudeBridgeManager: RecordingResolverCodexOAuthClaudeBridgeManager()
+        )
+
+        XCTAssertEqual(context.providerSnapshot?.availableModels, ["MiniMax-M2.7"])
     }
 
     func testResolveClaudeContextPrefetchesModelsForAllBuiltInOpenAIPresets() async throws {

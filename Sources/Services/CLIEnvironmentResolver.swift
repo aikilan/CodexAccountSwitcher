@@ -94,10 +94,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 throw CLIEnvironmentResolverError.missingProviderCredential
             }
             let provider = try resolvedProviderConfig(for: account)
-            let shouldManageModelCatalog = shouldManageCodexModelCatalog(
-                for: account,
-                providerIdentifier: provider.identifier
-            )
+            let shouldManageModelCatalog = shouldManageCodexModelCatalog(for: account)
             let availableModels = shouldManageModelCatalog || !account.supportsResponsesAPI
                 ? await availableModelsForBridge(
                     account: account,
@@ -233,6 +230,11 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 throw CLIEnvironmentResolverError.missingProviderCredential
             }
             let provider = try resolvedProviderConfig(for: account)
+            let availableModels = await availableModelsForBridge(
+                account: account,
+                providerBaseURL: provider.baseURL,
+                apiKey: providerCredential.apiKey
+            )
             let runtimeBaseURL = normalizedMiniMaxAnthropicBaseURL(provider.baseURL, includeVersion: false) ?? provider.baseURL
             let rootURL = managedClaudeRootURL(
                 for: account.id,
@@ -246,7 +248,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 baseURL: runtimeBaseURL,
                 apiKeyEnvName: provider.apiKeyEnvName,
                 apiKey: providerCredential.apiKey,
-                availableModels: nil
+                availableModels: availableModels
             )
             return ResolvedClaudeCLILaunchContext(
                 accountID: account.id,
@@ -444,17 +446,14 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         return !preset.isCustom
     }
 
-    private func shouldManageCodexModelCatalog(
-        for account: ManagedAccount,
-        providerIdentifier: String
-    ) -> Bool {
+    private func shouldManageCodexModelCatalog(for account: ManagedAccount) -> Bool {
         switch account.providerRule {
         case .chatgptOAuth, .claudeProfile:
             return false
         case .claudeCompatible:
             return true
         case .openAICompatible:
-            return providerIdentifier != "openai"
+            return account.providerPresetID != "openai"
         }
     }
 

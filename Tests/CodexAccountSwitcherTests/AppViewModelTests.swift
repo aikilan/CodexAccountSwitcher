@@ -1475,7 +1475,7 @@ final class AppViewModelTests: XCTestCase {
                 modelProvider: nil,
                 baseURL: "https://api.minimax.io/anthropic",
                 apiKeyEnvName: "MINIMAX_API_KEY",
-                availableModels: nil
+                availableModels: ["MiniMax-M2.7"]
             )
         )
         XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "https://api.minimax.io/anthropic")
@@ -1535,7 +1535,7 @@ final class AppViewModelTests: XCTestCase {
                 modelProvider: nil,
                 baseURL: "https://api.anthropic.com/v1",
                 apiKeyEnvName: "ANTHROPIC_API_KEY",
-                availableModels: nil
+                availableModels: ["claude-sonnet-4.5"]
             )
         )
         XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "https://api.anthropic.com/v1")

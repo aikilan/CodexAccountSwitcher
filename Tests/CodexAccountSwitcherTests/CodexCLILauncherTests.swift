@@ -116,7 +116,16 @@ final class CodexCLILauncherTests: XCTestCase {
                 modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(
                     availableModels: ["deepseek-chat", "deepseek-reasoner", "deepseek-chat"]
                 ),
-                configFileContents: "model = \"deepseek-chat\"\nmodel_provider = \"deepseek\"\n",
+                configFileContents: """
+                model = "deepseek-chat"
+                model_provider = "deepseek"
+
+                [model_providers.deepseek]
+                name = "DeepSeek"
+                base_url = "http://127.0.0.1:18082"
+                env_key = "OPENAI_API_KEY"
+                wire_api = "responses"
+                """,
                 environmentVariables: ["OPENAI_API_KEY": "sk-deepseek-test"],
                 arguments: []
             )
@@ -125,7 +134,21 @@ final class CodexCLILauncherTests: XCTestCase {
         let configURL = codexHomeURL.appendingPathComponent("config.toml")
         let catalogURL = codexHomeURL.appendingPathComponent("model-catalog.json")
         let configContents = try String(contentsOf: configURL)
-        XCTAssertTrue(configContents.contains("model_catalog_json = \"\(catalogURL.path)\""))
+        let expectedConfigContents = """
+        model = "deepseek-chat"
+        model_provider = "deepseek"
+        model_catalog_json = "\(catalogURL.path)"
+
+        [model_providers.deepseek]
+        name = "DeepSeek"
+        base_url = "http://127.0.0.1:18082"
+        env_key = "OPENAI_API_KEY"
+        wire_api = "responses"
+        """
+        XCTAssertEqual(configContents, expectedConfigContents)
+        let modelCatalogIndex = try XCTUnwrap(configContents.range(of: "model_catalog_json")?.lowerBound)
+        let providerTableIndex = try XCTUnwrap(configContents.range(of: "[model_providers.deepseek]")?.lowerBound)
+        XCTAssertLessThan(modelCatalogIndex, providerTableIndex)
 
         let catalogData = try Data(contentsOf: catalogURL)
         let catalogObject = try XCTUnwrap(JSONSerialization.jsonObject(with: catalogData) as? [String: Any])
