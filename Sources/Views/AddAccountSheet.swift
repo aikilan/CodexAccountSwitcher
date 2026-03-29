@@ -38,6 +38,12 @@ struct AddAccountSheet: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
+            Image(nsImage: AppIconArtwork.appIcon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 34, height: 34)
+                .padding(.top, 2)
+
             VStack(alignment: .leading, spacing: 8) {
                 Text(L10n.tr("Orbit"))
                     .font(.caption.weight(.semibold))

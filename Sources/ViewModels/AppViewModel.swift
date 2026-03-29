@@ -140,6 +140,7 @@ final class AppViewModel: ObservableObject {
     private let codexCLILauncher: any CodexCLILaunching
     private let claudeCLILauncher: any ClaudeCLILaunching
     private let claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging
+    private let appSupportPathRepairer: any AppSupportPathRepairing
     private let codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     private let openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging
     private let claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -171,6 +172,7 @@ final class AppViewModel: ObservableObject {
         codexCLILauncher: any CodexCLILaunching = CodexCLILauncher(),
         claudeCLILauncher: any ClaudeCLILaunching = ClaudeCLILauncher(),
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = ClaudePatchedRuntimeManager(),
+        appSupportPathRepairer: any AppSupportPathRepairing = AppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = CodexOAuthClaudeBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = OpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = ClaudeProviderCodexBridgeManager(),
@@ -193,6 +195,7 @@ final class AppViewModel: ObservableObject {
         self.codexCLILauncher = codexCLILauncher
         self.claudeCLILauncher = claudeCLILauncher
         self.claudePatchedRuntimeManager = claudePatchedRuntimeManager
+        self.appSupportPathRepairer = appSupportPathRepairer
         self.codexOAuthClaudeBridgeManager = codexOAuthClaudeBridgeManager
         self.openAICompatibleProviderCodexBridgeManager = openAICompatibleProviderCodexBridgeManager
         self.claudeProviderCodexBridgeManager = claudeProviderCodexBridgeManager
@@ -235,6 +238,7 @@ final class AppViewModel: ObservableObject {
                 codexCLILauncher: CodexCLILauncher(),
                 claudeCLILauncher: ClaudeCLILauncher(),
                 claudePatchedRuntimeManager: ClaudePatchedRuntimeManager(),
+                appSupportPathRepairer: AppSupportPathRepairer(),
                 codexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManager(),
                 openAICompatibleProviderCodexBridgeManager: OpenAICompatibleProviderCodexBridgeManager(),
                 claudeProviderCodexBridgeManager: ClaudeProviderCodexBridgeManager(),
@@ -507,6 +511,13 @@ final class AppViewModel: ObservableObject {
             try credentialStore.preload()
         } catch {
             database.appendLog(level: .warning, message: L10n.tr("本地凭据缓存读取失败，将在需要时回退迁移：%@", error.localizedDescription))
+        }
+
+        do {
+            _ = try appSupportPathRepairer.repairLegacyAbsolutePaths(in: paths.appSupportDirectoryURL)
+        } catch {
+            database.appendLog(level: .warning, message: L10n.tr("运行期目录路径修复失败：%@", error.localizedDescription))
+            try? await persistDatabase()
         }
 
         await importCurrentAuthIfNeeded()

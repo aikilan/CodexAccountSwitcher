@@ -168,6 +168,56 @@ final class CodexCLILauncherTests: XCTestCase {
         )
     }
 
+    func testLaunchCLIRewritesLegacyManagedModelCatalogEntry() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+        let launcher = CodexCLILauncher(
+            fileManager: fileManager,
+            runAppleScript: { _ in }
+        )
+        let workingDirectoryURL = rootURL.appendingPathComponent("workspace", isDirectory: true)
+        let codexHomeURL = rootURL.appendingPathComponent("codex-home", isDirectory: true)
+
+        try launcher.launchCLI(
+            context: ResolvedCodexCLILaunchContext(
+                accountID: UUID(),
+                workingDirectoryURL: workingDirectoryURL,
+                mode: .isolated,
+                codexHomeURL: codexHomeURL,
+                authPayload: nil,
+                modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(
+                    availableModels: ["deepseek-chat", "deepseek-reasoner"]
+                ),
+                configFileContents: """
+                model = "deepseek-chat"
+                model_provider = "deepseek"
+
+                [model_providers.deepseek]
+                name = "DeepSeek"
+                base_url = "http://127.0.0.1:18082"
+                env_key = "OPENAI_API_KEY"
+                wire_api = "responses"
+                model_catalog_json = "/tmp/LLMAccountSwitcher/account-cli/codex/legacy/model-catalog.json"
+                """,
+                environmentVariables: [:],
+                arguments: []
+            )
+        )
+
+        let configURL = codexHomeURL.appendingPathComponent("config.toml")
+        let catalogURL = codexHomeURL.appendingPathComponent("model-catalog.json")
+        let configContents = try String(contentsOf: configURL)
+
+        XCTAssertTrue(configContents.contains("model_catalog_json = \"\(catalogURL.path)\""))
+        XCTAssertFalse(configContents.contains("LLMAccountSwitcher"))
+        XCTAssertEqual(configContents.components(separatedBy: "model_catalog_json = ").count - 1, 1)
+        let modelCatalogIndex = try XCTUnwrap(configContents.range(of: "model_catalog_json")?.lowerBound)
+        let providerTableIndex = try XCTUnwrap(configContents.range(of: "[model_providers.deepseek]")?.lowerBound)
+        XCTAssertLessThan(modelCatalogIndex, providerTableIndex)
+    }
+
     func testLaunchCLIPropagatesAppleScriptFailure() {
         let fileManager = FileManager.default
         let appSupport = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

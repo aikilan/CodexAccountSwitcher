@@ -158,6 +158,12 @@ private struct NoopClaudePatchedRuntimeManager: ClaudePatchedRuntimeManaging {
     }
 }
 
+struct NoopAppSupportPathRepairer: AppSupportPathRepairing {
+    func repairLegacyAbsolutePaths(in appSupportDirectoryURL: URL) throws -> Bool {
+        false
+    }
+}
+
 private struct NoopCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManaging {
     func prepareBridge(
         accountID: UUID,
@@ -223,6 +229,7 @@ extension AppViewModel {
         cliLauncher: any CodexCLILaunching = CodexCLILauncher(),
         claudeCLILauncher: any ClaudeCLILaunching = NoopClaudeCLILauncher(),
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = NoopClaudePatchedRuntimeManager(),
+        appSupportPathRepairer: any AppSupportPathRepairing = NoopAppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = NoopCodexOAuthClaudeBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = NoopOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = NoopClaudeProviderCodexBridgeManager(),
@@ -245,6 +252,7 @@ extension AppViewModel {
             codexCLILauncher: cliLauncher,
             claudeCLILauncher: claudeCLILauncher,
             claudePatchedRuntimeManager: claudePatchedRuntimeManager,
+            appSupportPathRepairer: appSupportPathRepairer,
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,

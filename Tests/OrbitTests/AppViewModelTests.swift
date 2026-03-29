@@ -180,6 +180,54 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.selectedAccount?.codexAccountID, "acct_actual")
     }
 
+    func testPrepareCallsAppSupportPathRepairerOnce() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let repairer = RecordingAppSupportPathRepairer()
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            appSupportPathRepairer: repairer
+        )
+
+        await harness.model.prepare()
+        await harness.model.prepare()
+
+        XCTAssertEqual(repairer.repairCallCount, 1)
+        XCTAssertEqual(repairer.lastAppSupportDirectoryURL, harness.model.paths.appSupportDirectoryURL)
+    }
+
+    func testPrepareContinuesWhenAppSupportPathRepairFails() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let repairer = RecordingAppSupportPathRepairer()
+        repairer.result = .failure(MockError.unused)
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            appSupportPathRepairer: repairer
+        )
+
+        await harness.model.prepare()
+
+        XCTAssertEqual(repairer.repairCallCount, 1)
+        XCTAssertEqual(harness.model.activeAccount?.id, accountID)
+        XCTAssertTrue(
+            harness.model.database.switchLogs.contains {
+                $0.level == .warning && $0.message.contains("运行期目录路径修复失败")
+            }
+        )
+    }
+
     func testPreparePassivelyImportsCurrentCodexAuthWhenClaudeIsActive() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1652,6 +1700,35 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(record.target, .claude)
     }
 
+    func testCLILaunchHistoryKeepsSamePathForDifferentTargets() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let codexCLILauncher = RecordingCodexCLILauncher()
+        let claudeCLILauncher = RecordingClaudeCLILauncher()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            cliLauncher: codexCLILauncher,
+            claudeCLILauncher: claudeCLILauncher
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+        let workingDirectoryURL = makeWorkingDirectoryURL("shared-cli-history")
+
+        await harness.model.openCLI(for: account, target: .codex, workingDirectoryURL: workingDirectoryURL)
+        await harness.model.openCLI(for: account, target: .claude, workingDirectoryURL: workingDirectoryURL)
+
+        let history = harness.model.cliLaunchHistory(for: account.id)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(history.map(\.path), [workingDirectoryURL.path, workingDirectoryURL.path])
+        XCTAssertEqual(history.map(\.target), [.claude, .codex])
+    }
+
     func testClaudeProfileAccountCannotOpenCodexCLI() async throws {
         let accountID = UUID()
         let claudeAccountID = UUID()
@@ -2539,6 +2616,7 @@ final class AppViewModelTests: XCTestCase {
         cliLauncher: any CodexCLILaunching = RecordingCodexCLILauncher(),
         claudeCLILauncher: any ClaudeCLILaunching = RecordingClaudeCLILauncher(),
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = RecordingClaudePatchedRuntimeManager(),
+        appSupportPathRepairer: any AppSupportPathRepairing = NoopAppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = RecordingCodexOAuthClaudeBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = RecordingOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = RecordingClaudeProviderCodexBridgeManager(),
@@ -2638,6 +2716,7 @@ final class AppViewModelTests: XCTestCase {
             cliLauncher: cliLauncher,
             claudeCLILauncher: claudeCLILauncher,
             claudePatchedRuntimeManager: claudePatchedRuntimeManager,
+            appSupportPathRepairer: appSupportPathRepairer,
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
@@ -2977,6 +3056,18 @@ private final class RecordingClaudePatchedRuntimeManager: @unchecked Sendable, C
         prepareCallCount += 1
         lastModel = model
         return runtimeURL
+    }
+}
+
+private final class RecordingAppSupportPathRepairer: @unchecked Sendable, AppSupportPathRepairing {
+    var repairCallCount = 0
+    var lastAppSupportDirectoryURL: URL?
+    var result: Result<Bool, Error> = .success(false)
+
+    func repairLegacyAbsolutePaths(in appSupportDirectoryURL: URL) throws -> Bool {
+        repairCallCount += 1
+        lastAppSupportDirectoryURL = appSupportDirectoryURL
+        return try result.get()
     }
 }
 

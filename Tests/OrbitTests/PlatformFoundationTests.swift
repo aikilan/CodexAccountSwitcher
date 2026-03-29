@@ -226,6 +226,33 @@ final class PlatformFoundationTests: XCTestCase {
         XCTAssertEqual(database.defaultCLITarget(for: try XCTUnwrap(database.account(id: accountID))), .codex)
     }
 
+    func testCLILaunchHistoryDecodesTargetAndLegacyEnvironmentTarget() throws {
+        let json = """
+        [
+          {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "path": "/tmp/codex-workspace",
+            "target": "codex",
+            "lastUsedAt": "2026-03-25T10:00:00Z"
+          },
+          {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "path": "/tmp/claude-workspace",
+            "environmentTarget": "claude",
+            "lastUsedAt": "2026-03-25T11:00:00Z"
+          }
+        ]
+        """
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let records = try decoder.decode([CLILaunchRecord].self, from: Data(json.utf8))
+
+        XCTAssertEqual(records.map(\.path), ["/tmp/codex-workspace", "/tmp/claude-workspace"])
+        XCTAssertEqual(records.map(\.target), [.codex, .claude])
+    }
+
     func testLegacyDefaultEnvironmentMigratesToDefaultTarget() throws {
         let accountID = UUID()
         let json = """

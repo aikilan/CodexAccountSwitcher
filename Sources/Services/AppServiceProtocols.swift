@@ -45,6 +45,10 @@ protocol ClaudePatchedRuntimeManaging: Sendable {
     ) throws -> URL
 }
 
+protocol AppSupportPathRepairing: Sendable {
+    func repairLegacyAbsolutePaths(in appSupportDirectoryURL: URL) throws -> Bool
+}
+
 enum OpenAICompatibleClaudeBridgeSource: Equatable, Sendable {
     case codexAuthPayload(CodexAuthPayload)
     case provider(baseURL: String, apiKeyEnvName: String, apiKey: String, supportsResponsesAPI: Bool)

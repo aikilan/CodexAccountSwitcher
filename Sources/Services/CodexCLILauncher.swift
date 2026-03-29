@@ -125,7 +125,7 @@ struct CodexCLILauncher {
         from context: ResolvedCodexCLILaunchContext,
         codexHomeURL: URL
     ) throws -> String? {
-        var configContents = context.configFileContents ?? ""
+        var configContents = removingManagedModelCatalogEntries(from: context.configFileContents ?? "")
 
         if let snapshot = context.modelCatalogSnapshot {
             let modelCatalogURL = codexHomeURL.appendingPathComponent(Self.managedModelCatalogFileName)
@@ -138,6 +138,15 @@ struct CodexCLILauncher {
         }
 
         return configContents.isEmpty ? nil : configContents
+    }
+
+    private func removingManagedModelCatalogEntries(from configContents: String) -> String {
+        configContents
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { line in
+                line.trimmingCharacters(in: .whitespaces).hasPrefix("model_catalog_json = ") == false
+            }
+            .joined(separator: "\n")
     }
 
     private func insertingRootConfigEntry(_ entry: String, into configContents: String) -> String {

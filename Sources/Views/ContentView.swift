@@ -97,17 +97,24 @@ struct ContentView: View {
     }
 
     private var sidebarHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(L10n.tr("Orbit"))
-                .font(.system(size: 32, weight: .bold, design: .rounded))
+        HStack(alignment: .top, spacing: 14) {
+            Image(nsImage: AppIconArtwork.appIcon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 40, height: 40)
 
-            Text(L10n.tr("本地 LLM 账号工作台"))
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(L10n.tr("Orbit"))
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
 
-            Text(L10n.tr("账号"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                Text(L10n.tr("本地 LLM 账号工作台"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                Text(L10n.tr("账号"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, SidebarLayoutMetrics.horizontalPadding)
         .padding(.vertical, SidebarLayoutMetrics.sectionVerticalPadding)
@@ -379,6 +386,7 @@ private struct AccountListRow: View {
     let isSelected: Bool
 
     @State private var isHovering = false
+    @State private var isHoveringFailureIcon = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -405,9 +413,24 @@ private struct AccountListRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            Label(statusSummary ?? fallbackStatusSummary, systemImage: "gauge.with.dots.needle.67percent")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 6) {
+                Label(statusSummary ?? fallbackStatusSummary, systemImage: "gauge.with.dots.needle.67percent")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                if let failureStatusMessage {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.red)
+                        .onHover { hovering in
+                            isHoveringFailureIcon = hovering
+                        }
+                        .popover(isPresented: failurePopoverBinding, arrowEdge: .leading) {
+                            AccountFailurePopoverContent(message: failureStatusMessage)
+                        }
+                }
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
@@ -460,6 +483,25 @@ private struct AccountListRow: View {
         account.platform == .claude ? L10n.tr("状态未同步") : L10n.tr("额度未同步")
     }
 
+    private var failureStatusMessage: String? {
+        guard
+            let level = account.lastStatusLevel,
+            level != .info,
+            let message = account.lastStatusMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !message.isEmpty
+        else {
+            return nil
+        }
+        return message
+    }
+
+    private var failurePopoverBinding: Binding<Bool> {
+        Binding(
+            get: { failureStatusMessage != nil && isHoveringFailureIcon },
+            set: { isHoveringFailureIcon = $0 }
+        )
+    }
+
     private var backgroundColor: Color {
         if isSelected {
             return OrbitPalette.panel
@@ -486,6 +528,20 @@ private struct AccountListRow: View {
     private func claudeRemainingText(_ value: Int?) -> String {
         guard let value else { return L10n.tr("未知") }
         return "\(value)"
+    }
+}
+
+private struct AccountFailurePopoverContent: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.caption)
+            .foregroundStyle(.primary)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 260, alignment: .leading)
+            .padding(12)
     }
 }
 
@@ -1194,9 +1250,16 @@ private struct CLIDirectoryHistoryCard: View {
                             .font(.headline)
                             .lineLimit(1)
 
+                        Text(record.target.displayName)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(OrbitPalette.accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(OrbitPalette.accentSoft, in: Capsule())
+
                         Spacer(minLength: 8)
 
-                        Text(L10n.tr("点击启动 CLI"))
+                        Text(L10n.tr("点击启动 %@", record.target.displayName))
                             .font(.caption.weight(.medium))
                             .foregroundStyle(isDisabled ? .tertiary : .secondary)
                     }
@@ -1210,7 +1273,8 @@ private struct CLIDirectoryHistoryCard: View {
             }
             .buttonStyle(.plain)
             .disabled(isDisabled)
-            .help(isDisabled ? L10n.tr("当前不可点击") : L10n.tr("点击快速启动 CLI"))
+            .help(isDisabled ? L10n.tr("当前不可点击") : L10n.tr("点击快速启动 %@", record.target.displayName))
+            .accessibilityLabel(L10n.tr("点击启动 %@", record.target.displayName))
 
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")

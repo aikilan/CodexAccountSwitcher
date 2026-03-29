@@ -57,8 +57,19 @@ struct ClaudePatchedRuntimeManager: @unchecked Sendable {
         let wrapperURL = runtimeRootURL
             .appendingPathComponent("bin", isDirectory: true)
             .appendingPathComponent("claude", isDirectory: false)
+        let patchedCLIURL = runtimeRootURL
+            .appendingPathComponent("package", isDirectory: true)
+            .appendingPathComponent("cli.js", isDirectory: false)
+        let expectedWrapperContents = wrapperScript(
+            nodeCommand: installation.nodeCommand,
+            patchedCLIURL: patchedCLIURL
+        )
 
-        if fileManager.isExecutableFile(atPath: wrapperURL.path) {
+        if isReusableRuntime(
+            wrapperURL: wrapperURL,
+            patchedCLIURL: patchedCLIURL,
+            expectedWrapperContents: expectedWrapperContents
+        ) {
             return wrapperURL
         }
 
@@ -70,7 +81,6 @@ struct ClaudePatchedRuntimeManager: @unchecked Sendable {
         try fileManager.createDirectory(at: runtimeRootURL, withIntermediateDirectories: true)
         try fileManager.copyItem(at: installation.packageRootURL, to: packageDestinationURL)
 
-        let patchedCLIURL = packageDestinationURL.appendingPathComponent("cli.js", isDirectory: false)
         let originalCLIContents = try String(contentsOf: patchedCLIURL, encoding: .utf8)
         let patchedCLIContents = try patchCLIContents(originalCLIContents, model: normalizedModel)
         try patchedCLIContents.write(to: patchedCLIURL, atomically: true, encoding: .utf8)
@@ -78,13 +88,27 @@ struct ClaudePatchedRuntimeManager: @unchecked Sendable {
 
         let wrapperDirectoryURL = wrapperURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: wrapperDirectoryURL, withIntermediateDirectories: true)
-        try wrapperScript(
-            nodeCommand: installation.nodeCommand,
-            patchedCLIURL: patchedCLIURL
-        ).write(to: wrapperURL, atomically: true, encoding: .utf8)
+        try expectedWrapperContents.write(to: wrapperURL, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapperURL.path)
 
         return wrapperURL
+    }
+
+    private func isReusableRuntime(
+        wrapperURL: URL,
+        patchedCLIURL: URL,
+        expectedWrapperContents: String
+    ) -> Bool {
+        guard fileManager.isExecutableFile(atPath: wrapperURL.path) else {
+            return false
+        }
+        guard fileManager.fileExists(atPath: patchedCLIURL.path) else {
+            return false
+        }
+        guard let wrapperContents = try? String(contentsOf: wrapperURL, encoding: .utf8) else {
+            return false
+        }
+        return wrapperContents == expectedWrapperContents
     }
 
     private func sourceInstallation() throws -> SourceInstallation {

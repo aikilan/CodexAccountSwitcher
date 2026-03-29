@@ -79,6 +79,45 @@ final class ClaudePatchedRuntimeManagerTests: XCTestCase {
         XCTAssertNotEqual(runtimeV1, runtimeV2)
     }
 
+    func testPreparePatchedRuntimeRebuildsCachedRuntimeWhenWrapperContainsLegacySupportPath() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: rootURL) }
+
+        let sourceCLIURL = try makeSourceRuntime(rootURL: rootURL, version: "2.1.87")
+        let appSupportURL = rootURL.appendingPathComponent("Orbit", isDirectory: true)
+        try fileManager.createDirectory(at: appSupportURL, withIntermediateDirectories: true)
+
+        let manager = ClaudePatchedRuntimeManager(
+            fileManager: fileManager,
+            resolveClaudeExecutableURL: { sourceCLIURL }
+        )
+
+        let runtimeURL = try manager.preparePatchedRuntime(
+            model: "openrouter/anthropic/claude-sonnet-4.5",
+            appSupportDirectoryURL: appSupportURL
+        )
+
+        let legacyWrapperContents = """
+        #!/bin/sh
+        export ANTHROPIC_CUSTOM_MODEL_OPTION='openrouter/anthropic/claude-sonnet-4.5'
+        export CLAUDE_CODE_CONTEXT_LIMIT='32000'
+        exec '\(sourceCLIURL.deletingLastPathComponent().appendingPathComponent("node", isDirectory: false).path)' '/tmp/LLMAccountSwitcher/claude-patched-runtimes/2.1.87/hash/package/cli.js' "$@"
+        """
+        try legacyWrapperContents.write(to: runtimeURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runtimeURL.path)
+
+        let rebuiltRuntimeURL = try manager.preparePatchedRuntime(
+            model: "openrouter/anthropic/claude-sonnet-4.5",
+            appSupportDirectoryURL: appSupportURL
+        )
+        let rebuiltWrapperContents = try String(contentsOf: rebuiltRuntimeURL, encoding: .utf8)
+
+        XCTAssertEqual(rebuiltRuntimeURL, runtimeURL)
+        XCTAssertFalse(rebuiltWrapperContents.contains("LLMAccountSwitcher"))
+        XCTAssertTrue(rebuiltWrapperContents.contains(appSupportURL.path))
+    }
+
     func testPreparePatchedRuntimeSupportsInlineAgentModelEnumShape() throws {
         let fileManager = FileManager.default
         let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
