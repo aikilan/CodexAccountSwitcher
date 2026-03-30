@@ -23,7 +23,7 @@ It targets macOS 14 or later. If you build from Terminal, use a Swift 6 toolchai
 
 ### Unified Account Workspace
 
-![Orbit workspace](https://raw.githubusercontent.com/aikilan/Orbit/refs/heads/main/example/static/workspace.png)
+![Orbit workspace](https://raw.githubusercontent.com/aikilan/Orbit/refs/heads/main/example/static/workspaceEN.png)
 
 The main workspace keeps account switching, account details, quota snapshots, status logs, recent directories, and CLI target selection in one view. You can review the current account and decide whether the next launch should open Codex CLI or Claude Code.
 
