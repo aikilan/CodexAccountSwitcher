@@ -3,8 +3,10 @@
 "5 小时剩余" = "5-hour remaining";
 "5 小时重置" = "5-hour reset";
 "5h %@ / 7d %@" = "5h %@ / 7d %@";
+"5h %@" = "5h %@";
 "7 天剩余" = "7-day remaining";
 "7 天重置" = "7-day reset";
+"7d %@" = "7d %@";
 "API Key" = "API Key";
 "API Key • %@" = "API Key • %@";
 "API Key 接入" = "API Key Setup";
