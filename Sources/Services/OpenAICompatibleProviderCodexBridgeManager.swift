@@ -280,10 +280,12 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
             let state = currentState()
             let requestObject = try requestJSONObject(from: request.body)
             let wantsStream = (requestObject["stream"] as? Bool) ?? false
+            let usesMiniMaxReasoning = isMiniMaxAPIHost(state.baseURL)
             let upstreamRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
                 from: request.body,
                 fallbackModel: state.defaultModel,
-                requiresNonEmptyToolParameters: isMiniMaxAPIHost(state.baseURL)
+                requiresNonEmptyToolParameters: usesMiniMaxReasoning,
+                usesMiniMaxReasoning: usesMiniMaxReasoning
             )
             let (statusCode, data) = try await sendUpstreamRequest(state.baseURL, state.apiKey, upstreamRequest)
 
@@ -296,7 +298,8 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
 
             let responseData = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
                 from: data,
-                fallbackModel: state.defaultModel
+                fallbackModel: state.defaultModel,
+                usesMiniMaxReasoning: usesMiniMaxReasoning
             )
             guard let responseObject = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
                 throw ResponsesChatCompletionsBridge.TranslationError.invalidResponse(L10n.tr("本地桥接响应格式无效。"))

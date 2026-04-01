@@ -18,7 +18,8 @@ enum ResponsesChatCompletionsBridge {
     static func makeChatCompletionsRequestData(
         from data: Data,
         fallbackModel: String,
-        requiresNonEmptyToolParameters: Bool = false
+        requiresNonEmptyToolParameters: Bool = false,
+        usesMiniMaxReasoning: Bool = false
     ) throws -> Data {
         guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TranslationError.invalidRequest(L10n.tr("Responses 请求不是有效的 JSON。"))
@@ -27,13 +28,22 @@ enum ResponsesChatCompletionsBridge {
         let object = try makeChatCompletionsRequestObject(
             from: request,
             fallbackModel: fallbackModel,
-            requiresNonEmptyToolParameters: requiresNonEmptyToolParameters
+            requiresNonEmptyToolParameters: requiresNonEmptyToolParameters,
+            usesMiniMaxReasoning: usesMiniMaxReasoning
         )
         return try JSONSerialization.data(withJSONObject: object, options: [])
     }
 
-    static func makeResponsesResponseData(from data: Data, fallbackModel: String) throws -> Data {
-        let object = try makeResponsesResponseObject(from: data, fallbackModel: fallbackModel)
+    static func makeResponsesResponseData(
+        from data: Data,
+        fallbackModel: String,
+        usesMiniMaxReasoning: Bool = false
+    ) throws -> Data {
+        let object = try makeResponsesResponseObject(
+            from: data,
+            fallbackModel: fallbackModel,
+            usesMiniMaxReasoning: usesMiniMaxReasoning
+        )
         return try JSONSerialization.data(withJSONObject: object, options: [])
     }
 
@@ -62,6 +72,110 @@ enum ResponsesChatCompletionsBridge {
         for (outputIndex, item) in outputItems.enumerated() {
             let itemType = trimmedString(item["type"]) ?? "message"
             switch itemType {
+            case "reasoning":
+                let itemID = trimmedString(item["id"]) ?? "rs_\(UUID().uuidString)"
+                let summaryItems = (item["summary"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+
+                appendStreamEvent(
+                    named: "response.output_item.added",
+                    payload: [
+                        "type": "response.output_item.added",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "reasoning",
+                            "status": "in_progress",
+                            "summary": [],
+                            "content": NSNull(),
+                        ],
+                    ],
+                    to: &events
+                )
+
+                var completedSummary = [[String: Any]]()
+                for (summaryIndex, summaryItem) in summaryItems.enumerated() {
+                    let summaryType = trimmedString(summaryItem["type"]) ?? "summary_text"
+                    guard summaryType == "summary_text" else { continue }
+                    let text = summaryItem["text"] as? String ?? ""
+                    let addedPart: [String: Any] = [
+                        "type": "summary_text",
+                        "text": "",
+                    ]
+                    let completedPart: [String: Any] = [
+                        "type": "summary_text",
+                        "text": text,
+                    ]
+
+                    appendStreamEvent(
+                        named: "response.reasoning_summary_part.added",
+                        payload: [
+                            "type": "response.reasoning_summary_part.added",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "summary_index": summaryIndex,
+                            "part": addedPart,
+                        ],
+                        to: &events
+                    )
+                    if !text.isEmpty {
+                        appendStreamEvent(
+                            named: "response.reasoning_summary_text.delta",
+                            payload: [
+                                "type": "response.reasoning_summary_text.delta",
+                                "response_id": responseID,
+                                "output_index": outputIndex,
+                                "item_id": itemID,
+                                "summary_index": summaryIndex,
+                                "delta": text,
+                            ],
+                            to: &events
+                        )
+                    }
+                    appendStreamEvent(
+                        named: "response.reasoning_summary_text.done",
+                        payload: [
+                            "type": "response.reasoning_summary_text.done",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "summary_index": summaryIndex,
+                            "text": text,
+                        ],
+                        to: &events
+                    )
+                    appendStreamEvent(
+                        named: "response.reasoning_summary_part.done",
+                        payload: [
+                            "type": "response.reasoning_summary_part.done",
+                            "response_id": responseID,
+                            "output_index": outputIndex,
+                            "item_id": itemID,
+                            "summary_index": summaryIndex,
+                            "part": completedPart,
+                        ],
+                        to: &events
+                    )
+                    completedSummary.append(completedPart)
+                }
+
+                appendStreamEvent(
+                    named: "response.output_item.done",
+                    payload: [
+                        "type": "response.output_item.done",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "reasoning",
+                            "status": "completed",
+                            "summary": completedSummary,
+                            "content": NSNull(),
+                        ],
+                    ],
+                    to: &events
+                )
             case "message":
                 let itemID = trimmedString(item["id"]) ?? "msg_\(UUID().uuidString)"
                 let role = normalizedRole(from: item["role"])
@@ -278,11 +392,16 @@ enum ResponsesChatCompletionsBridge {
     private static func makeChatCompletionsRequestObject(
         from request: [String: Any],
         fallbackModel: String,
-        requiresNonEmptyToolParameters: Bool
+        requiresNonEmptyToolParameters: Bool,
+        usesMiniMaxReasoning: Bool
     ) throws -> [String: Any] {
         let model = trimmedString(request["model"]) ?? fallbackModel
         let instructions = trimmedString(request["instructions"])
-        let messages = try translateMessages(from: request["input"], instructions: instructions)
+        let messages = try translateMessages(
+            from: request["input"],
+            instructions: instructions,
+            usesMiniMaxReasoning: usesMiniMaxReasoning
+        )
         let tools = translateTools(
             from: request["tools"],
             requiresNonEmptyToolParameters: requiresNonEmptyToolParameters
@@ -305,10 +424,17 @@ enum ResponsesChatCompletionsBridge {
         if let parallelToolCalls = request["parallel_tool_calls"] as? Bool {
             body["parallel_tool_calls"] = parallelToolCalls
         }
+        if usesMiniMaxReasoning {
+            body["reasoning_split"] = true
+        }
         return body
     }
 
-    private static func translateMessages(from input: Any?, instructions: String?) throws -> [[String: Any]] {
+    private static func translateMessages(
+        from input: Any?,
+        instructions: String?,
+        usesMiniMaxReasoning: Bool
+    ) throws -> [[String: Any]] {
         var messages = [[String: Any]]()
         if let instructions, !instructions.isEmpty {
             messages.append([
@@ -330,11 +456,23 @@ enum ResponsesChatCompletionsBridge {
         }
 
         var lastAssistantIndex: Int?
+        var pendingReasoningDetails = [[String: Any]]()
 
         for itemValue in items {
             guard let item = itemValue as? [String: Any], let type = trimmedString(item["type"]) else { continue }
 
             switch type {
+            case "reasoning":
+                guard usesMiniMaxReasoning else { continue }
+                let reasoningDetails = reasoningDetails(from: item)
+                guard !reasoningDetails.isEmpty else { continue }
+                if let index = lastAssistantIndex {
+                    var message = messages[index]
+                    mergeReasoningDetails(reasoningDetails, into: &message)
+                    messages[index] = message
+                } else {
+                    pendingReasoningDetails.append(contentsOf: reasoningDetails)
+                }
             case "message":
                 let role = normalizedRole(from: item["role"])
                 var message: [String: Any] = ["role": role]
@@ -345,12 +483,20 @@ enum ResponsesChatCompletionsBridge {
                 } else {
                     message["content"] = ""
                 }
+                if usesMiniMaxReasoning, role == "assistant", !pendingReasoningDetails.isEmpty {
+                    mergeReasoningDetails(pendingReasoningDetails, into: &message)
+                    pendingReasoningDetails.removeAll()
+                }
                 messages.append(message)
                 lastAssistantIndex = role == "assistant" ? messages.index(before: messages.endIndex) : nil
             case "function_call", "custom_tool_call":
                 let toolCall = makeToolCall(from: item, type: type)
                 if let index = lastAssistantIndex {
                     var message = messages[index]
+                    if usesMiniMaxReasoning, !pendingReasoningDetails.isEmpty {
+                        mergeReasoningDetails(pendingReasoningDetails, into: &message)
+                        pendingReasoningDetails.removeAll()
+                    }
                     var toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
                     toolCalls.append(toolCall)
                     message["tool_calls"] = toolCalls
@@ -359,11 +505,16 @@ enum ResponsesChatCompletionsBridge {
                     }
                     messages[index] = message
                 } else {
-                    messages.append([
+                    var message: [String: Any] = [
                         "role": "assistant",
                         "content": NSNull(),
                         "tool_calls": [toolCall],
-                    ])
+                    ]
+                    if usesMiniMaxReasoning, !pendingReasoningDetails.isEmpty {
+                        mergeReasoningDetails(pendingReasoningDetails, into: &message)
+                        pendingReasoningDetails.removeAll()
+                    }
+                    messages.append(message)
                     lastAssistantIndex = messages.index(before: messages.endIndex)
                 }
             case "function_call_output":
@@ -379,6 +530,39 @@ enum ResponsesChatCompletionsBridge {
         }
 
         return messages
+    }
+
+    private static func reasoningDetails(from item: [String: Any]) -> [[String: Any]] {
+        var details = [[String: Any]]()
+
+        let summaryItems = (item["summary"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+        for summaryItem in summaryItems {
+            guard let text = trimmedString(summaryItem["text"]) else { continue }
+            details.append(["text": text])
+        }
+        if !details.isEmpty {
+            return details
+        }
+
+        let contentItems = (item["content"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+        for contentItem in contentItems {
+            guard let text = trimmedString(contentItem["text"]) else { continue }
+            details.append(["text": text])
+        }
+        if !details.isEmpty {
+            return details
+        }
+
+        if let text = trimmedString(item["text"]) {
+            details.append(["text": text])
+        }
+        return details
+    }
+
+    private static func mergeReasoningDetails(_ details: [[String: Any]], into message: inout [String: Any]) {
+        guard !details.isEmpty else { return }
+        let existingDetails = (message["reasoning_details"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+        message["reasoning_details"] = existingDetails + details
     }
 
     private static func normalizedRole(from value: Any?) -> String {
@@ -594,7 +778,11 @@ enum ResponsesChatCompletionsBridge {
         }
     }
 
-    private static func makeResponsesResponseObject(from data: Data, fallbackModel: String) throws -> [String: Any] {
+    private static func makeResponsesResponseObject(
+        from data: Data,
+        fallbackModel: String,
+        usesMiniMaxReasoning: Bool
+    ) throws -> [String: Any] {
         guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TranslationError.invalidResponse(L10n.tr("上游 Chat Completions 返回了无效 JSON。"))
         }
@@ -608,14 +796,17 @@ enum ResponsesChatCompletionsBridge {
         }
 
         var output = [[String: Any]]()
-        let content = outputTextContent(from: message["content"])
-        if !content.isEmpty {
+        let normalizedOutput = normalizedOutput(from: message, usesMiniMaxReasoning: usesMiniMaxReasoning)
+        if let reasoningItem = normalizedOutput.reasoningItem {
+            output.append(reasoningItem)
+        }
+        if !normalizedOutput.content.isEmpty {
             output.append([
                 "id": "msg_\(UUID().uuidString)",
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
-                "content": content,
+                "content": normalizedOutput.content,
             ])
         }
 
@@ -669,32 +860,144 @@ enum ResponsesChatCompletionsBridge {
         ]
     }
 
-    private static func outputTextContent(from value: Any?) -> [[String: Any]] {
+    private static func normalizedOutput(
+        from message: [String: Any],
+        usesMiniMaxReasoning: Bool
+    ) -> (reasoningItem: [String: Any]?, content: [[String: Any]]) {
+        var reasoningTexts = usesMiniMaxReasoning ? reasoningTexts(from: message["reasoning_details"]) : []
+        let extraction = outputTextContent(
+            from: message["content"],
+            stripMiniMaxThinking: usesMiniMaxReasoning,
+            collectMiniMaxThinking: usesMiniMaxReasoning && reasoningTexts.isEmpty
+        )
+        if reasoningTexts.isEmpty {
+            reasoningTexts = extraction.reasoningTexts
+        }
+
+        let reasoningItem: [String: Any]?
+        if usesMiniMaxReasoning, !reasoningTexts.isEmpty {
+            reasoningItem = [
+                "id": "rs_\(UUID().uuidString)",
+                "type": "reasoning",
+                "summary": reasoningTexts.map { text in
+                    [
+                        "type": "summary_text",
+                        "text": text,
+                    ]
+                },
+                "content": NSNull(),
+            ]
+        } else {
+            reasoningItem = nil
+        }
+
+        return (reasoningItem, extraction.content)
+    }
+
+    private static func reasoningTexts(from value: Any?) -> [String] {
         switch value {
         case let string as String:
-            guard !string.isEmpty else { return [] }
-            return [[
-                "type": "output_text",
-                "text": string,
-            ]]
+            return trimmedString(string).map { [$0] } ?? []
         case let items as [Any]:
             return items.compactMap { itemValue in
-                guard
-                    let item = itemValue as? [String: Any],
-                    let type = trimmedString(item["type"]),
-                    type == "text",
-                    let text = item["text"] as? String
-                else {
+                if let text = trimmedString(itemValue) {
+                    return text
+                }
+                guard let item = itemValue as? [String: Any] else {
                     return nil
                 }
-                return [
-                    "type": "output_text",
-                    "text": text,
-                ]
+                return trimmedString(item["text"])
             }
         default:
             return []
         }
+    }
+
+    private static func outputTextContent(
+        from value: Any?,
+        stripMiniMaxThinking: Bool = false,
+        collectMiniMaxThinking: Bool = false
+    ) -> (content: [[String: Any]], reasoningTexts: [String]) {
+        switch value {
+        case let string as String:
+            let extracted = extractMiniMaxThinking(
+                from: string,
+                stripMiniMaxThinking: stripMiniMaxThinking,
+                collectMiniMaxThinking: collectMiniMaxThinking
+            )
+            guard !extracted.content.isEmpty else {
+                return ([], extracted.reasoningTexts)
+            }
+            return ([[
+                "type": "output_text",
+                "text": extracted.content,
+            ]], extracted.reasoningTexts)
+        case let items as [Any]:
+            var reasoningTexts = [String]()
+            let content = items.compactMap { itemValue -> [String: Any]? in
+                guard
+                    let item = itemValue as? [String: Any],
+                    let type = trimmedString(item["type"]),
+                    type == "text" || type == "output_text",
+                    let text = item["text"] as? String
+                else {
+                    return nil
+                }
+                let extracted = extractMiniMaxThinking(
+                    from: text,
+                    stripMiniMaxThinking: stripMiniMaxThinking,
+                    collectMiniMaxThinking: collectMiniMaxThinking
+                )
+                reasoningTexts.append(contentsOf: extracted.reasoningTexts)
+                guard !extracted.content.isEmpty else {
+                    return nil
+                }
+                return [
+                    "type": "output_text",
+                    "text": extracted.content,
+                ]
+            }
+            return (content, reasoningTexts)
+        default:
+            return ([], [])
+        }
+    }
+
+    private static func extractMiniMaxThinking(
+        from text: String,
+        stripMiniMaxThinking: Bool,
+        collectMiniMaxThinking: Bool
+    ) -> (content: String, reasoningTexts: [String]) {
+        guard stripMiniMaxThinking, !text.isEmpty else {
+            return (text, [])
+        }
+
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "<think>(.*?)</think>",
+                options: [.caseInsensitive, .dotMatchesLineSeparators]
+            )
+        else {
+            return (text, [])
+        }
+
+        let range = NSRange(location: 0, length: (text as NSString).length)
+        let matches = regex.matches(in: text, options: [], range: range)
+        guard !matches.isEmpty else {
+            return (text, [])
+        }
+
+        let nsText = text as NSString
+        let reasoningTexts = collectMiniMaxThinking ? matches.compactMap { match -> String? in
+            guard match.numberOfRanges > 1 else { return nil }
+            let thinkRange = match.range(at: 1)
+            guard thinkRange.location != NSNotFound else { return nil }
+            return trimmedString(nsText.substring(with: thinkRange))
+        } : []
+
+        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (stripped, reasoningTexts)
     }
 
     private static func trimmedString(_ value: Any?) -> String? {

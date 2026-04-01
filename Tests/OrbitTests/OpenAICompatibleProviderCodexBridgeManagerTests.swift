@@ -264,6 +264,160 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
 
         XCTAssertEqual(Array(properties.keys), ["_compat"])
         XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+        XCTAssertEqual(upstreamRequestObject["reasoning_split"] as? Bool, true)
+    }
+
+    func testMiniMaxBridgeSeparatesReasoningFromVisibleOutput() async throws {
+        actor Recorder {
+            var lastRequestBody: Data?
+
+            func store(_ data: Data) {
+                lastRequestBody = data
+            }
+
+            func body() -> Data? {
+                lastRequestBody
+            }
+        }
+
+        let recorder = Recorder()
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_minimax_reasoning",
+            "model": "MiniMax-M2.7",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "reasoning_details": [
+                            [
+                                "text": "先检查模块边界。",
+                            ],
+                        ],
+                        "content": "这是最终答案。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            ],
+        ])
+
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, body in
+                await recorder.store(body)
+                return (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.minimax.io/v1",
+            apiKeyEnvName: "MINIMAX_API_KEY",
+            apiKey: "sk-minimax-test",
+            model: "MiniMax-M2.7",
+            availableModels: ["MiniMax-M2.7"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "stream": false,
+            "input": "分析一下这个项目",
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let responseObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let output = try XCTUnwrap(responseObject["output"] as? [[String: Any]])
+        let summary = try XCTUnwrap(output.first?["summary"] as? [[String: Any]])
+        let content = try XCTUnwrap(output.dropFirst().first?["content"] as? [[String: Any]])
+        let capturedBody = await recorder.body()
+        let upstreamBody = try XCTUnwrap(capturedBody)
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamBody) as? [String: Any])
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(upstreamRequestObject["reasoning_split"] as? Bool, true)
+        XCTAssertEqual(output.first?["type"] as? String, "reasoning")
+        XCTAssertEqual(summary.first?["text"] as? String, "先检查模块边界。")
+        XCTAssertEqual(output.dropFirst().first?["type"] as? String, "message")
+        XCTAssertEqual(content.first?["text"] as? String, "这是最终答案。")
+    }
+
+    func testMiniMaxBridgeStreamsReasoningBeforeVisibleAnswer() async throws {
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_minimax_stream",
+            "model": "MiniMax-M2.7",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "reasoning_details": [
+                            [
+                                "text": "先整理上下文。",
+                            ],
+                        ],
+                        "content": "嗨。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 9,
+                "completion_tokens": 2,
+                "total_tokens": 11,
+            ],
+        ])
+
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, _ in
+                (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.minimax.io/v1",
+            apiKeyEnvName: "MINIMAX_API_KEY",
+            apiKey: "sk-minimax-test",
+            model: "MiniMax-M2.7",
+            availableModels: ["MiniMax-M2.7"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "stream": true,
+            "input": "用一句中文说 hi",
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let text = String(data: data, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(httpResponse.value(forHTTPHeaderField: "Content-Type"), "text/event-stream")
+        XCTAssertTrue(text.contains("event: response.reasoning_summary_part.added"))
+        XCTAssertTrue(text.contains("event: response.reasoning_summary_text.delta"))
+        XCTAssertTrue(text.contains("event: response.reasoning_summary_text.done"))
+        XCTAssertTrue(text.contains("\"type\":\"reasoning\""))
+        XCTAssertTrue(text.contains("event: response.output_text.delta"))
+        XCTAssertTrue(text.contains("\"text\":\"嗨。\""))
+        XCTAssertTrue(text.contains("event: response.completed"))
     }
 
     func testModelsEndpointReturnsAvailableModelsAndAppendsDefaultModel() async throws {

@@ -137,7 +137,8 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
         let bridged = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
             from: request,
             fallbackModel: "MiniMax-M2.7",
-            requiresNonEmptyToolParameters: true
+            requiresNonEmptyToolParameters: true,
+            usesMiniMaxReasoning: true
         )
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: bridged) as? [String: Any])
         let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
@@ -147,6 +148,124 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
 
         XCTAssertEqual(Array(properties.keys), ["_compat"])
         XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+        XCTAssertEqual(object["reasoning_split"] as? Bool, true)
+    }
+
+    func testResponsesChatCompletionsBridgePreservesMiniMaxReasoningDetailsInHistory() throws {
+        let request = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "input": [
+                [
+                    "type": "reasoning",
+                    "summary": [
+                        [
+                            "type": "summary_text",
+                            "text": "先分析目录结构。",
+                        ],
+                    ],
+                ],
+                [
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        [
+                            "type": "output_text",
+                            "text": "我先看看项目结构。",
+                        ],
+                    ],
+                ],
+            ],
+        ])
+
+        let bridged = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
+            from: request,
+            fallbackModel: "MiniMax-M2.7",
+            usesMiniMaxReasoning: true
+        )
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: bridged) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        let reasoningDetails = try XCTUnwrap(messages.first?["reasoning_details"] as? [[String: Any]])
+
+        XCTAssertEqual(reasoningDetails.first?["text"] as? String, "先分析目录结构。")
+        XCTAssertEqual(messages.first?["content"] as? String, "我先看看项目结构。")
+    }
+
+    func testResponsesChatCompletionsBridgeConvertsMiniMaxReasoningDetailsToReasoningOutput() throws {
+        let response = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_minimax_reasoning",
+            "model": "MiniMax-M2.7",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "reasoning_details": [
+                            [
+                                "text": "先确认依赖关系，再给结论。",
+                            ],
+                        ],
+                        "content": "这是最终答案。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 12,
+                "completion_tokens": 8,
+                "total_tokens": 20,
+            ],
+        ])
+
+        let bridged = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
+            from: response,
+            fallbackModel: "MiniMax-M2.7",
+            usesMiniMaxReasoning: true
+        )
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: bridged) as? [String: Any])
+        let output = try XCTUnwrap(object["output"] as? [[String: Any]])
+        let summary = try XCTUnwrap(output.first?["summary"] as? [[String: Any]])
+        let content = try XCTUnwrap(output.dropFirst().first?["content"] as? [[String: Any]])
+
+        XCTAssertEqual(output.first?["type"] as? String, "reasoning")
+        XCTAssertEqual(summary.first?["text"] as? String, "先确认依赖关系，再给结论。")
+        XCTAssertEqual(output.dropFirst().first?["type"] as? String, "message")
+        XCTAssertEqual(content.first?["text"] as? String, "这是最终答案。")
+    }
+
+    func testResponsesChatCompletionsBridgeSplitsMiniMaxThinkTagsFromVisibleOutput() throws {
+        let response = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_minimax_think",
+            "model": "MiniMax-M2.7",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "content": "<think>先看模块，再输出总结。</think>\n最终答案",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 12,
+                "completion_tokens": 8,
+                "total_tokens": 20,
+            ],
+        ])
+
+        let bridged = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
+            from: response,
+            fallbackModel: "MiniMax-M2.7",
+            usesMiniMaxReasoning: true
+        )
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: bridged) as? [String: Any])
+        let output = try XCTUnwrap(object["output"] as? [[String: Any]])
+        let summary = try XCTUnwrap(output.first?["summary"] as? [[String: Any]])
+        let content = try XCTUnwrap(output.dropFirst().first?["content"] as? [[String: Any]])
+
+        XCTAssertEqual(output.first?["type"] as? String, "reasoning")
+        XCTAssertEqual(summary.first?["text"] as? String, "先看模块，再输出总结。")
+        XCTAssertEqual(content.first?["text"] as? String, "最终答案")
     }
 
     func testResponsesBridgeRequestUsesStreamingAndListInput() throws {
