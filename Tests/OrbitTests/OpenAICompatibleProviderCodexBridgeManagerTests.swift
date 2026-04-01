@@ -179,6 +179,87 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertTrue(text.contains("data: [DONE]"))
     }
 
+    func testBridgeRetriesTransient529BeforeReturningSuccess() async throws {
+        actor AttemptCounter {
+            private var count = 0
+
+            func next() -> Int {
+                count += 1
+                return count
+            }
+
+            func value() -> Int {
+                count
+            }
+        }
+
+        let attempts = AttemptCounter()
+        let overloadResponse = try JSONSerialization.data(withJSONObject: [
+            "error": [
+                "message": "The server cluster is currently under high load.",
+                "type": "api_error",
+            ],
+        ])
+        let successResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_retry_test",
+            "model": "MiniMax-M2.7",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "content": "恢复成功。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+            ],
+        ])
+
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, _ in
+                let attempt = await attempts.next()
+                return attempt < 3 ? (529, overloadResponse) : (200, successResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.minimax.io/v1",
+            apiKeyEnvName: "MINIMAX_API_KEY",
+            apiKey: "sk-minimax-test",
+            model: "MiniMax-M2.7",
+            availableModels: ["MiniMax-M2.7"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "stream": false,
+            "input": "说一句话",
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let responseObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let output = try XCTUnwrap(responseObject["output"] as? [[String: Any]])
+        let content = try XCTUnwrap(output.first?["content"] as? [[String: Any]])
+        let totalAttempts = await attempts.value()
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(totalAttempts, 3)
+        XCTAssertEqual(content.first?["text"] as? String, "恢复成功。")
+    }
+
     func testMiniMaxBridgeFillsEmptyToolParametersBeforeForwarding() async throws {
         actor Recorder {
             var lastRequestBody: Data?
@@ -235,6 +316,7 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "MiniMax-M2.7",
             "stream": false,
+            "parallel_tool_calls": true,
             "input": "关闭页面",
             "tools": [
                 [
@@ -265,6 +347,7 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertEqual(Array(properties.keys), ["_compat"])
         XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
         XCTAssertEqual(upstreamRequestObject["reasoning_split"] as? Bool, true)
+        XCTAssertEqual(upstreamRequestObject["parallel_tool_calls"] as? Bool, false)
     }
 
     func testMiniMaxBridgeSeparatesReasoningFromVisibleOutput() async throws {

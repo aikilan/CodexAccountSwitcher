@@ -102,6 +102,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
     private let queue = DispatchQueue(label: "com.openai.Orbit.openai-compatible-provider-bridge")
     private let stateQueue = DispatchQueue(label: "com.openai.Orbit.openai-compatible-provider-bridge.state")
     private let sendUpstreamRequest: @Sendable (String, String, Data) async throws -> (Int, Data)
+    private let overloadRetryDelaysNanos: [UInt64] = [200_000_000, 500_000_000]
 
     private var listener: NWListener?
     private var localBaseURL: String?
@@ -287,7 +288,11 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                 requiresNonEmptyToolParameters: usesMiniMaxReasoning,
                 usesMiniMaxReasoning: usesMiniMaxReasoning
             )
-            let (statusCode, data) = try await sendUpstreamRequest(state.baseURL, state.apiKey, upstreamRequest)
+            let (statusCode, data) = try await sendUpstreamRequestHandlingOverload(
+                baseURL: state.baseURL,
+                apiKey: state.apiKey,
+                body: upstreamRequest
+            )
 
             guard (200..<300).contains(statusCode) else {
                 return jsonResponse(
@@ -330,6 +335,19 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
         stateQueue.sync {
             (upstreamBaseURL, apiKeyEnvName, apiKey, defaultModel, availableModels)
         }
+    }
+
+    private func sendUpstreamRequestHandlingOverload(
+        baseURL: String,
+        apiKey: String,
+        body: Data
+    ) async throws -> (Int, Data) {
+        var response = try await sendUpstreamRequest(baseURL, apiKey, body)
+        for delay in overloadRetryDelaysNanos where response.0 == 529 {
+            try await Task.sleep(nanoseconds: delay)
+            response = try await sendUpstreamRequest(baseURL, apiKey, body)
+        }
+        return response.0 == 529 ? (429, response.1) : response
     }
 
     private func send(response: HTTPResponse, through connection: NWConnection) {

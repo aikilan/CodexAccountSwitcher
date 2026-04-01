@@ -156,6 +156,7 @@ final class CodexCLILauncherTests: XCTestCase {
         XCTAssertEqual(models.count, 2)
         XCTAssertEqual(models.compactMap { $0["slug"] as? String }, ["deepseek-chat", "deepseek-reasoner"])
         XCTAssertEqual(models.compactMap { $0["display_name"] as? String }, ["deepseek-chat", "deepseek-reasoner"])
+        XCTAssertEqual(models.compactMap { $0["supports_parallel_tool_calls"] as? Bool }, [true, true])
 
         XCTAssertEqual(
             capturedLines,
@@ -216,6 +217,44 @@ final class CodexCLILauncherTests: XCTestCase {
         let modelCatalogIndex = try XCTUnwrap(configContents.range(of: "model_catalog_json")?.lowerBound)
         let providerTableIndex = try XCTUnwrap(configContents.range(of: "[model_providers.deepseek]")?.lowerBound)
         XCTAssertLessThan(modelCatalogIndex, providerTableIndex)
+    }
+
+    func testLaunchCLIWritesManagedModelCatalogWithParallelToolCallsDisabledWhenUnsupported() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+        let launcher = CodexCLILauncher(
+            fileManager: fileManager,
+            runAppleScript: { _ in }
+        )
+        let workingDirectoryURL = rootURL.appendingPathComponent("workspace", isDirectory: true)
+        let codexHomeURL = rootURL.appendingPathComponent("codex-home", isDirectory: true)
+
+        try launcher.launchCLI(
+            context: ResolvedCodexCLILaunchContext(
+                accountID: UUID(),
+                workingDirectoryURL: workingDirectoryURL,
+                mode: .isolated,
+                codexHomeURL: codexHomeURL,
+                authPayload: nil,
+                modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(
+                    availableModels: ["MiniMax-M2.7"],
+                    supportsParallelToolCalls: false
+                ),
+                configFileContents: "model = \"MiniMax-M2.7\"\n",
+                environmentVariables: [:],
+                arguments: []
+            )
+        )
+
+        let catalogData = try Data(contentsOf: codexHomeURL.appendingPathComponent("model-catalog.json"))
+        let catalogObject = try XCTUnwrap(JSONSerialization.jsonObject(with: catalogData) as? [String: Any])
+        let models = try XCTUnwrap(catalogObject["models"] as? [[String: Any]])
+
+        XCTAssertEqual(models.count, 1)
+        XCTAssertEqual(models.first?["slug"] as? String, "MiniMax-M2.7")
+        XCTAssertEqual(models.first?["supports_parallel_tool_calls"] as? Bool, false)
     }
 
     func testLaunchCLIPropagatesAppleScriptFailure() {

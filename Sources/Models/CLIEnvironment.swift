@@ -436,6 +436,12 @@ struct ResolvedCodexDesktopLaunchContext: Equatable, Sendable {
 
 struct ResolvedCodexModelCatalogSnapshot: Equatable, Sendable {
     let availableModels: [String]
+    let supportsParallelToolCalls: Bool
+
+    init(availableModels: [String], supportsParallelToolCalls: Bool = true) {
+        self.availableModels = availableModels
+        self.supportsParallelToolCalls = supportsParallelToolCalls
+    }
 }
 
 struct ResolvedClaudeProviderSnapshot: Equatable, Sendable {

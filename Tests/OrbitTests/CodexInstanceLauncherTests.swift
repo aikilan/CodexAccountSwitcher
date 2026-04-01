@@ -25,10 +25,10 @@ final class CodexInstanceLauncherTests: XCTestCase {
         let launcher = CodexInstanceLauncher(
             fileManager: fileManager,
             resolveAppURL: { appURL },
-            runProcess: { executableURL, arguments, environment in
-                capturedExecutableURL = executableURL
-                capturedArguments = arguments
-                capturedEnvironment = environment
+            runProcess: { process in
+                capturedExecutableURL = process.executableURL
+                capturedArguments = process.arguments ?? []
+                capturedEnvironment = process.environment ?? [:]
             }
         )
 
@@ -125,9 +125,9 @@ final class CodexInstanceLauncherTests: XCTestCase {
         let launcher = CodexInstanceLauncher(
             fileManager: fileManager,
             resolveAppURL: { appURL },
-            runProcess: { _, arguments, environment in
-                capturedArguments = arguments
-                capturedEnvironment = environment
+            runProcess: { process in
+                capturedArguments = process.arguments ?? []
+                capturedEnvironment = process.environment ?? [:]
             }
         )
 
@@ -164,5 +164,63 @@ final class CodexInstanceLauncherTests: XCTestCase {
         XCTAssertTrue(configContents.contains("model_catalog_json = "))
         XCTAssertTrue(catalogContents.contains("\"slug\" : \"deepseek-chat\""))
         XCTAssertTrue(catalogContents.contains("\"slug\" : \"deepseek-reasoner\""))
+    }
+
+    func testLaunchIsolatedInstanceInvokesTerminationHandlerWhenProcessExits() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+        let appURL = root.appendingPathComponent("Codex.app", isDirectory: true)
+        let executableURL = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent("Codex", isDirectory: false)
+
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: executableURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        fileManager.createFile(atPath: executableURL.path, contents: Data("#!/bin/sh\nexit 0\n".utf8))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+
+        let launcher = CodexInstanceLauncher(
+            fileManager: fileManager,
+            resolveAppURL: { appURL }
+        )
+        let account = ManagedAccount(
+            id: UUID(),
+            codexAccountID: "acct_termination",
+            displayName: "Termination User",
+            email: "termination@example.com",
+            authMode: .chatgpt,
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        let payload = CodexAuthPayload(
+            tokens: CodexTokenBundle(
+                idToken: "id_termination",
+                accessToken: "access_termination",
+                refreshToken: "refresh_termination",
+                accountID: "acct_termination"
+            ),
+            lastRefresh: CodexDateCoding.string(from: Date())
+        )
+        let terminated = expectation(description: "isolated instance terminated")
+
+        _ = try launcher.launchIsolatedInstance(
+            for: account,
+            payload: payload,
+            appSupportDirectoryURL: appSupport,
+            onTermination: {
+                terminated.fulfill()
+            }
+        )
+
+        wait(for: [terminated], timeout: 2)
     }
 }

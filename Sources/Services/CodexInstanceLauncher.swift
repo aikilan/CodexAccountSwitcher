@@ -21,22 +21,26 @@ struct CodexInstanceLauncher {
 
     private let fileManager: FileManager
     private let resolveAppURL: () -> URL?
-    private let runProcess: (URL, [String], [String: String]) throws -> Void
+    private let runProcess: (Process) throws -> Void
+    private let runningProcesses: RunningProcessStore
 
     init(
         fileManager: FileManager = .default,
         resolveAppURL: @escaping () -> URL? = Self.resolveInstalledCodexAppURL,
-        runProcess: @escaping (URL, [String], [String: String]) throws -> Void = Self.runCodexProcess
+        runProcess: @escaping (Process) throws -> Void = Self.runCodexProcess,
+        runningProcesses: RunningProcessStore = RunningProcessStore()
     ) {
         self.fileManager = fileManager
         self.resolveAppURL = resolveAppURL
         self.runProcess = runProcess
+        self.runningProcesses = runningProcesses
     }
 
     func launchIsolatedInstance(
         for account: ManagedAccount,
         payload: CodexAuthPayload,
-        appSupportDirectoryURL: URL
+        appSupportDirectoryURL: URL,
+        onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths {
         let paths = isolatedLaunchPaths(for: account.id, appSupportDirectoryURL: appSupportDirectoryURL)
         let context = ResolvedCodexDesktopLaunchContext(
@@ -47,11 +51,12 @@ struct CodexInstanceLauncher {
             configFileContents: nil,
             environmentVariables: [:]
         )
-        return try launchIsolatedInstance(context: context)
+        return try launchIsolatedInstance(context: context, onTermination: onTermination)
     }
 
     func launchIsolatedInstance(
-        context: ResolvedCodexDesktopLaunchContext
+        context: ResolvedCodexDesktopLaunchContext,
+        onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths {
         guard let appURL = resolveAppURL() else {
             throw CodexInstanceLauncherError.applicationNotFound
@@ -77,11 +82,25 @@ struct CodexInstanceLauncher {
         }
         environment["CODEX_HOME"] = context.codexHomeURL.path
 
-        try runProcess(
-            executableURL,
-            ["--user-data-dir=\(paths.userDataURL.path)"],
-            environment
-        )
+        let processID = UUID()
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["--user-data-dir=\(paths.userDataURL.path)"]
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [runningProcesses] _ in
+            runningProcesses.remove(for: processID)
+            onTermination()
+        }
+        runningProcesses.insert(process, for: processID)
+
+        do {
+            try runProcess(process)
+        } catch {
+            runningProcesses.remove(for: processID)
+            throw error
+        }
 
         return paths
     }
@@ -138,19 +157,26 @@ struct CodexInstanceLauncher {
             ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
     }
 
-    private static func runCodexProcess(
-        executableURL: URL,
-        arguments: [String],
-        environment: [String: String]
-    ) throws {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.environment = environment
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+    private static func runCodexProcess(_ process: Process) throws {
         try process.run()
     }
 }
 
 extension CodexInstanceLauncher: CodexInstanceLaunching {}
+
+final class RunningProcessStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: [UUID: Process] = [:]
+
+    func insert(_ process: Process, for id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        processes[id] = process
+    }
+
+    func remove(for id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        processes.removeValue(forKey: id)
+    }
+}

@@ -422,7 +422,7 @@ enum ResponsesChatCompletionsBridge {
             body["max_tokens"] = maxTokens
         }
         if let parallelToolCalls = request["parallel_tool_calls"] as? Bool {
-            body["parallel_tool_calls"] = parallelToolCalls
+            body["parallel_tool_calls"] = usesMiniMaxReasoning ? false : parallelToolCalls
         }
         if usesMiniMaxReasoning {
             body["reasoning_split"] = true
@@ -529,7 +529,7 @@ enum ResponsesChatCompletionsBridge {
             }
         }
 
-        return messages
+        return usesMiniMaxReasoning ? normalizedMiniMaxMessages(messages) : messages
     }
 
     private static func reasoningDetails(from item: [String: Any]) -> [[String: Any]] {
@@ -563,6 +563,61 @@ enum ResponsesChatCompletionsBridge {
         guard !details.isEmpty else { return }
         let existingDetails = (message["reasoning_details"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
         message["reasoning_details"] = existingDetails + details
+    }
+
+    private static func normalizedMiniMaxMessages(_ messages: [[String: Any]]) -> [[String: Any]] {
+        var normalized = [[String: Any]]()
+        var index = 0
+
+        while index < messages.count {
+            let message = messages[index]
+            let role = trimmedString(message["role"]) ?? ""
+            let toolCalls = (message["tool_calls"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+
+            guard role == "assistant", toolCalls.count > 1 else {
+                normalized.append(message)
+                index += 1
+                continue
+            }
+
+            let toolCallIDs = Set(toolCalls.compactMap { trimmedString($0["id"]) })
+            var toolOutputsByID = [String: [String: Any]]()
+            var consumedToolOutputCount = 0
+            var lookaheadIndex = index + 1
+
+            while lookaheadIndex < messages.count {
+                let candidate = messages[lookaheadIndex]
+                guard trimmedString(candidate["role"]) == "tool" else {
+                    break
+                }
+                let callID = trimmedString(candidate["tool_call_id"]) ?? ""
+                guard toolCallIDs.contains(callID) else {
+                    break
+                }
+                toolOutputsByID[callID] = candidate
+                consumedToolOutputCount += 1
+                lookaheadIndex += 1
+            }
+
+            for (toolCallIndex, toolCall) in toolCalls.enumerated() {
+                var assistantMessage = message
+                assistantMessage["tool_calls"] = [toolCall]
+                if toolCallIndex > 0 {
+                    assistantMessage["content"] = NSNull()
+                    assistantMessage.removeValue(forKey: "reasoning_details")
+                }
+                normalized.append(assistantMessage)
+
+                let callID = trimmedString(toolCall["id"]) ?? ""
+                if let toolOutput = toolOutputsByID[callID] {
+                    normalized.append(toolOutput)
+                }
+            }
+
+            index += 1 + consumedToolOutputCount
+        }
+
+        return normalized
     }
 
     private static func normalizedRole(from value: Any?) -> String {

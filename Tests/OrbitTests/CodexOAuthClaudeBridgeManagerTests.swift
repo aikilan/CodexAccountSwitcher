@@ -3,6 +3,12 @@ import XCTest
 @testable import Orbit
 
 final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
+    override func tearDown() {
+        MiniMaxProviderMockURLProtocol.requestHandler = nil
+        URLProtocol.unregisterClass(MiniMaxProviderMockURLProtocol.self)
+        super.tearDown()
+    }
+
     func testResponsesChatCompletionsBridgeConvertsResponsesRequestToChatCompletions() throws {
         let request = try JSONSerialization.data(withJSONObject: [
             "model": "deepseek-chat",
@@ -154,6 +160,7 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
     func testResponsesChatCompletionsBridgePreservesMiniMaxReasoningDetailsInHistory() throws {
         let request = try JSONSerialization.data(withJSONObject: [
             "model": "MiniMax-M2.7",
+            "parallel_tool_calls": true,
             "input": [
                 [
                     "type": "reasoning",
@@ -188,6 +195,57 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
 
         XCTAssertEqual(reasoningDetails.first?["text"] as? String, "先分析目录结构。")
         XCTAssertEqual(messages.first?["content"] as? String, "我先看看项目结构。")
+        XCTAssertEqual(object["parallel_tool_calls"] as? Bool, false)
+    }
+
+    func testResponsesChatCompletionsBridgeSerializesMiniMaxToolOutputsAsAdjacentPairs() throws {
+        let request = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "input": [
+                [
+                    "type": "function_call",
+                    "call_id": "call_a",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                ],
+                [
+                    "type": "function_call",
+                    "call_id": "call_b",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"ls\"}",
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_a",
+                    "output": "/tmp/project",
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_b",
+                    "output": "README.md",
+                ],
+            ],
+        ])
+
+        let bridged = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
+            from: request,
+            fallbackModel: "MiniMax-M2.7",
+            usesMiniMaxReasoning: true
+        )
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: bridged) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        let firstToolCalls = try XCTUnwrap(messages[0]["tool_calls"] as? [[String: Any]])
+        let secondToolCalls = try XCTUnwrap(messages[2]["tool_calls"] as? [[String: Any]])
+
+        XCTAssertEqual(messages.count, 4)
+        XCTAssertEqual(messages[0]["role"] as? String, "assistant")
+        XCTAssertEqual(firstToolCalls.first?["id"] as? String, "call_a")
+        XCTAssertEqual(messages[1]["role"] as? String, "tool")
+        XCTAssertEqual(messages[1]["tool_call_id"] as? String, "call_a")
+        XCTAssertEqual(messages[2]["role"] as? String, "assistant")
+        XCTAssertEqual(secondToolCalls.first?["id"] as? String, "call_b")
+        XCTAssertEqual(messages[3]["role"] as? String, "tool")
+        XCTAssertEqual(messages[3]["tool_call_id"] as? String, "call_b")
     }
 
     func testResponsesChatCompletionsBridgeConvertsMiniMaxReasoningDetailsToReasoningOutput() throws {
@@ -363,6 +421,86 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
         XCTAssertTrue(text.contains("event: message_stop"))
     }
 
+    func testMiniMaxProviderBridgeDisablesParallelToolCallsAndStripsThinkingFromVisibleText() async throws {
+        let recordedRequestBody = RecordedRequestBodyBox()
+        MiniMaxProviderMockURLProtocol.requestHandler = { request in
+            recordedRequestBody.data = requestBody(from: request)
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = try JSONSerialization.data(withJSONObject: [
+                "id": "chatcmpl_minimax_bridge",
+                "model": "MiniMax-M2.7",
+                "choices": [
+                    [
+                        "index": 0,
+                        "message": [
+                            "role": "assistant",
+                            "content": "<think>先检查模块关系。</think>最终结论。",
+                        ],
+                        "finish_reason": "stop",
+                    ],
+                ],
+                "usage": [
+                    "prompt_tokens": 12,
+                    "completion_tokens": 8,
+                    "total_tokens": 20,
+                ],
+            ])
+            return (response, body)
+        }
+        URLProtocol.registerClass(MiniMaxProviderMockURLProtocol.self)
+
+        let manager = CodexOAuthClaudeBridgeManager()
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            source: .provider(
+                baseURL: "https://api.minimax.io/v1",
+                apiKeyEnvName: "MINIMAX_API_KEY",
+                apiKey: "sk-minimax-test",
+                supportsResponsesAPI: false
+            ),
+            model: "MiniMax-M2.7",
+            availableModels: ["MiniMax-M2.7"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/messages")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("codex-oauth-bridge", forHTTPHeaderField: "x-api-key")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "stream": false,
+            "messages": [
+                [
+                    "role": "user",
+                    "content": "分析一下这个项目",
+                ],
+            ],
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let content = try XCTUnwrap(object["content"] as? [[String: Any]])
+        let upstreamRequestBody = try XCTUnwrap(recordedRequestBody.data)
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamRequestBody) as? [String: Any])
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(upstreamRequestObject["reasoning_split"] as? Bool, true)
+        XCTAssertEqual(upstreamRequestObject["parallel_tool_calls"] as? Bool, false)
+        XCTAssertEqual(content.first?["type"] as? String, "text")
+        XCTAssertEqual(content.first?["text"] as? String, "最终结论。")
+    }
+
     func testModelsEndpointReturnsAvailableModelsForProviderBridge() async throws {
         let manager = CodexOAuthClaudeBridgeManager(
             sendUpstreamRequest: { _, _ in
@@ -458,4 +596,64 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
         XCTAssertEqual(httpResponse.statusCode, 200)
         XCTAssertEqual(models.compactMap { $0["id"] as? String }, ["gpt-5.3-codex", "gpt-5.4", "gpt-5.2-codex"])
     }
+}
+
+private final class MiniMaxProviderMockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requestHandler: (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host?.lowercased() == "api.minimax.io"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.requestHandler else {
+            XCTFail("MiniMaxProviderMockURLProtocol.requestHandler 未设置")
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RecordedRequestBodyBox: @unchecked Sendable {
+    var data: Data?
+}
+
+private func requestBody(from request: URLRequest) -> Data? {
+    if let body = request.httpBody {
+        return body
+    }
+
+    guard let stream = request.httpBodyStream else {
+        return nil
+    }
+
+    stream.open()
+    defer { stream.close() }
+
+    let bufferSize = 1024
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+    defer { buffer.deallocate() }
+
+    var data = Data()
+    while stream.hasBytesAvailable {
+        let read = stream.read(buffer, maxLength: bufferSize)
+        guard read > 0 else { break }
+        data.append(buffer, count: read)
+    }
+
+    return data.isEmpty ? nil : data
 }

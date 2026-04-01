@@ -433,7 +433,10 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
 
         return ResolvedCodexProviderEnvironment(
             modelCatalogSnapshot: shouldManageModelCatalog
-                ? ResolvedCodexModelCatalogSnapshot(availableModels: availableModels)
+                ? ResolvedCodexModelCatalogSnapshot(
+                    availableModels: availableModels,
+                    supportsParallelToolCalls: !isMiniMaxAPIHost(provider.baseURL)
+                )
                 : nil,
             configFileContents: codexConfigContents(
                 model: account.resolvedDefaultModel,

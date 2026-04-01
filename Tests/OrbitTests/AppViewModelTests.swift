@@ -2029,7 +2029,10 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(codexCLILauncher.lastContext?.configFileContents?.contains("base_url = \"http://127.0.0.1:18082\"") == true)
         XCTAssertEqual(
             codexCLILauncher.lastContext?.modelCatalogSnapshot,
-            ResolvedCodexModelCatalogSnapshot(availableModels: ["MiniMax-M2.7"])
+            ResolvedCodexModelCatalogSnapshot(
+                availableModels: ["MiniMax-M2.7"],
+                supportsParallelToolCalls: false
+            )
         )
     }
 
@@ -2408,6 +2411,13 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.selectedAccount?.id, savedAccount.id)
         XCTAssertEqual(try harness.credentialStore.load(for: savedAccount.id).providerAPIKeyCredential?.apiKey, "sk-deepseek")
         XCTAssertEqual(harness.model.banner?.message, L10n.tr("已保存账号 %@，并启动独立 Codex 实例。", "DeepSeek Work"))
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: savedAccount.id))
+
+        launcher.simulateTermination(for: savedAccount.id)
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertFalse(harness.model.hasLaunchedIsolatedInstance(for: savedAccount.id))
     }
 
     func testLaunchIsolatedCodexRefreshesChatGPTPayloadBeforeLaunching() async throws {
@@ -2515,6 +2525,35 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.banner?.message, L10n.tr("账号 %@ 的独立实例已在当前会话中启动。", account.displayName))
         XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
         XCTAssertFalse(harness.model.canLaunchIsolatedCodex(for: account))
+    }
+
+    func testLaunchIsolatedCodexClearsLaunchStateWhenInstanceTerminates() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let launcher = RecordingCodexInstanceLauncher()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            instanceLauncher: launcher
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.launchIsolatedCodex(for: account)
+
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+
+        launcher.simulateTermination(for: account.id)
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertFalse(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+        XCTAssertTrue(harness.model.canLaunchIsolatedCodex(for: account))
     }
 
     func testOpenCodexCLIUsesGlobalAuthForActiveAccountWithoutRefresh() async throws {
@@ -3215,16 +3254,19 @@ private final class RecordingCodexInstanceLauncher: CodexInstanceLaunching {
     var lastPayload: CodexAuthPayload?
     var lastContext: ResolvedCodexDesktopLaunchContext?
     var lastAppSupportDirectoryURL: URL?
+    private var terminationHandlers: [UUID: @Sendable () -> Void] = [:]
 
     func launchIsolatedInstance(
         for account: ManagedAccount,
         payload: CodexAuthPayload,
-        appSupportDirectoryURL: URL
+        appSupportDirectoryURL: URL,
+        onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths {
         launchCallCount += 1
         lastAccountID = account.id
         lastPayload = payload
         lastAppSupportDirectoryURL = appSupportDirectoryURL
+        terminationHandlers[account.id] = onTermination
         return IsolatedCodexLaunchPaths(
             rootDirectoryURL: appSupportDirectoryURL.appendingPathComponent("isolated-codex-instances").appendingPathComponent(account.id.uuidString),
             codexHomeURL: appSupportDirectoryURL.appendingPathComponent("isolated-codex-instances").appendingPathComponent(account.id.uuidString).appendingPathComponent("codex-home"),
@@ -3233,18 +3275,25 @@ private final class RecordingCodexInstanceLauncher: CodexInstanceLaunching {
     }
 
     func launchIsolatedInstance(
-        context: ResolvedCodexDesktopLaunchContext
+        context: ResolvedCodexDesktopLaunchContext,
+        onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths {
         launchCallCount += 1
         lastAccountID = context.accountID
         lastPayload = context.authPayload
         lastContext = context
+        terminationHandlers[context.accountID] = onTermination
         let rootDirectoryURL = context.codexHomeURL.deletingLastPathComponent()
         return IsolatedCodexLaunchPaths(
             rootDirectoryURL: rootDirectoryURL,
             codexHomeURL: context.codexHomeURL,
             userDataURL: rootDirectoryURL.appendingPathComponent("user-data")
         )
+    }
+
+    func simulateTermination(for accountID: UUID) {
+        let handler = terminationHandlers.removeValue(forKey: accountID)
+        handler?()
     }
 }
 

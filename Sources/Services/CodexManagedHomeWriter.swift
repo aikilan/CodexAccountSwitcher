@@ -122,14 +122,22 @@ struct CodexManagedHomeWriter {
         let models = normalizedAvailableModels(snapshot.availableModels)
         let catalog = [
             "models": models.enumerated().map { index, model in
-                modelCatalogEntry(for: model, priority: index)
+                modelCatalogEntry(
+                    for: model,
+                    priority: index,
+                    supportsParallelToolCalls: snapshot.supportsParallelToolCalls
+                )
             },
         ]
         let data = try JSONSerialization.data(withJSONObject: catalog, options: [.prettyPrinted, .sortedKeys])
         return String(decoding: data, as: UTF8.self) + "\n"
     }
 
-    private func modelCatalogEntry(for model: String, priority: Int) -> [String: Any] {
+    private func modelCatalogEntry(
+        for model: String,
+        priority: Int,
+        supportsParallelToolCalls: Bool
+    ) -> [String: Any] {
         [
             "apply_patch_tool_type": "freeform",
             "availability_nux": NSNull(),
@@ -149,7 +157,7 @@ struct CodexManagedHomeWriter {
             "supported_in_api": true,
             "supported_reasoning_levels": Self.managedReasoningLevels,
             "supports_image_detail_original": true,
-            "supports_parallel_tool_calls": true,
+            "supports_parallel_tool_calls": supportsParallelToolCalls,
             "supports_reasoning_summaries": true,
             "truncation_policy": [
                 "limit": 10000,

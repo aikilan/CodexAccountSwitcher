@@ -449,6 +449,19 @@ final class AppViewModel: ObservableObject {
         launchedIsolatedInstanceAccountIDs.contains(accountID)
     }
 
+    private func beginTrackingIsolatedInstance(for accountID: UUID) -> @Sendable () -> Void {
+        launchedIsolatedInstanceAccountIDs.insert(accountID)
+        return { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.launchedIsolatedInstanceAccountIDs.remove(accountID)
+            }
+        }
+    }
+
+    private func stopTrackingIsolatedInstance(for accountID: UUID) {
+        launchedIsolatedInstanceAccountIDs.remove(accountID)
+    }
+
     func isLaunchingCLI(for accountID: UUID) -> Bool {
         launchingCLIAccountID == accountID
     }
@@ -755,6 +768,7 @@ final class AppViewModel: ObservableObject {
         let trimmedAPIKey = desktopLaunchAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDisplayName = desktopLaunchDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedModel = desktopLaunchDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        var launchedAccountID: UUID?
 
         guard let preset = selectedDesktopLaunchPreset else {
             desktopLaunchError = L10n.tr("请选择一个可用的预设 Provider。")
@@ -794,6 +808,7 @@ final class AppViewModel: ObservableObject {
                 providerAPIKeyEnvName: preset.apiKeyEnvName,
                 defaultModel: trimmedModel
             )
+            launchedAccountID = account.id
             if !trimmedDisplayName.isEmpty {
                 account.displayName = trimmedDisplayName
                 database.upsert(account: account)
@@ -808,9 +823,8 @@ final class AppViewModel: ObservableObject {
                 openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
                 claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
             )
-            _ = try instanceLauncher.launchIsolatedInstance(context: context)
-
-            launchedIsolatedInstanceAccountIDs.insert(account.id)
+            let onTermination = beginTrackingIsolatedInstance(for: account.id)
+            _ = try instanceLauncher.launchIsolatedInstance(context: context, onTermination: onTermination)
             setActiveAccount(account.id)
             selectedAccountID = account.id
 
@@ -821,6 +835,9 @@ final class AppViewModel: ObservableObject {
             dismissProviderDesktopLaunch()
             return true
         } catch {
+            if let launchedAccountID {
+                stopTrackingIsolatedInstance(for: launchedAccountID)
+            }
             desktopLaunchError = error.localizedDescription
             desktopLaunchStatus = L10n.tr("预设 Provider 启动失败。")
             database.appendLog(level: .error, message: L10n.tr("预设 Provider 启动失败：%@", error.localizedDescription))
@@ -872,14 +889,16 @@ final class AppViewModel: ObservableObject {
                 }
             }
 
+            let onTermination = beginTrackingIsolatedInstance(for: account.id)
             _ = try instanceLauncher.launchIsolatedInstance(
                 for: account,
                 payload: payload,
-                appSupportDirectoryURL: paths.appSupportDirectoryURL
+                appSupportDirectoryURL: paths.appSupportDirectoryURL,
+                onTermination: onTermination
             )
-            launchedIsolatedInstanceAccountIDs.insert(account.id)
             pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
         } catch {
+            stopTrackingIsolatedInstance(for: account.id)
             pushBanner(level: .error, message: L10n.tr("启动独立 Codex 实例失败：%@", error.localizedDescription))
         }
     }
@@ -910,10 +929,11 @@ final class AppViewModel: ObservableObject {
                 openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
                 claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
             )
-            _ = try instanceLauncher.launchIsolatedInstance(context: context)
-            launchedIsolatedInstanceAccountIDs.insert(account.id)
+            let onTermination = beginTrackingIsolatedInstance(for: account.id)
+            _ = try instanceLauncher.launchIsolatedInstance(context: context, onTermination: onTermination)
             pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
         } catch {
+            stopTrackingIsolatedInstance(for: account.id)
             pushBanner(level: .error, message: L10n.tr("启动独立 Codex 实例失败：%@", error.localizedDescription))
         }
     }

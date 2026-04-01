@@ -169,12 +169,35 @@ protocol CodexInstanceLaunching {
     func launchIsolatedInstance(
         for account: ManagedAccount,
         payload: CodexAuthPayload,
-        appSupportDirectoryURL: URL
+        appSupportDirectoryURL: URL,
+        onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths
 
     func launchIsolatedInstance(
-        context: ResolvedCodexDesktopLaunchContext
+        context: ResolvedCodexDesktopLaunchContext,
+        onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths
+}
+
+extension CodexInstanceLaunching {
+    func launchIsolatedInstance(
+        for account: ManagedAccount,
+        payload: CodexAuthPayload,
+        appSupportDirectoryURL: URL
+    ) throws -> IsolatedCodexLaunchPaths {
+        try launchIsolatedInstance(
+            for: account,
+            payload: payload,
+            appSupportDirectoryURL: appSupportDirectoryURL,
+            onTermination: {}
+        )
+    }
+
+    func launchIsolatedInstance(
+        context: ResolvedCodexDesktopLaunchContext
+    ) throws -> IsolatedCodexLaunchPaths {
+        try launchIsolatedInstance(context: context, onTermination: {})
+    }
 }
 
 protocol CodexCLILaunching {
