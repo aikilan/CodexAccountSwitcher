@@ -6,6 +6,7 @@ enum ManagedAuthKind: String, Codable, CaseIterable, Sendable {
     case claudeProfile = "claude_profile"
     case anthropicAPIKey = "anthropic_api_key"
     case providerAPIKey = "provider_api_key"
+    case githubCopilot = "github_copilot"
 
     var displayName: String {
         switch self {
@@ -19,6 +20,8 @@ enum ManagedAuthKind: String, Codable, CaseIterable, Sendable {
             return L10n.tr("Anthropic API Key")
         case .providerAPIKey:
             return L10n.tr("Provider API Key")
+        case .githubCopilot:
+            return "GitHub Copilot"
         }
     }
 }

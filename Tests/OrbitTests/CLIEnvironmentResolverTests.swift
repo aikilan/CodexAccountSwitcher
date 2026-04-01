@@ -41,6 +41,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "sk-openai-test").validated()),
             claudeProfileManager: ResolverClaudeProfileManager(),
             claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             codexOAuthClaudeBridgeManager: bridgeManager
         )
 
@@ -83,6 +84,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             appPaths: paths,
             authPayload: nil,
             providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-ant-test").validated(),
+            copilotCredential: nil,
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
             claudeProviderCodexBridgeManager: bridgeManager
         )
@@ -125,6 +128,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "sk-openai-test").validated()),
             claudeProfileManager: ResolverClaudeProfileManager(),
             claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             codexOAuthClaudeBridgeManager: bridgeManager
         )
 
@@ -167,6 +171,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
                 credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "key-\(preset.id)").validated()),
                 claudeProfileManager: ResolverClaudeProfileManager(),
                 claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+                copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
                 codexOAuthClaudeBridgeManager: RecordingResolverCodexOAuthClaudeBridgeManager()
             )
 
@@ -229,6 +234,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             credential: nil,
             claudeProfileManager: ResolverClaudeProfileManager(),
             claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             codexOAuthClaudeBridgeManager: bridgeManager
         )
 
@@ -277,6 +283,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             appPaths: paths,
             authPayload: nil,
             providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-minimax-test").validated(),
+            copilotCredential: nil,
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
             claudeProviderCodexBridgeManager: bridgeManager
         )
@@ -329,6 +337,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             appPaths: paths,
             authPayload: nil,
             providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-custom-openai").validated(),
+            copilotCredential: nil,
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
             claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
         )
@@ -367,6 +377,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "sk-minimax-test").validated()),
             claudeProfileManager: ResolverClaudeProfileManager(),
             claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             codexOAuthClaudeBridgeManager: RecordingResolverCodexOAuthClaudeBridgeManager()
         )
 
@@ -398,6 +409,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "sk-ant-test").validated()),
             claudeProfileManager: ResolverClaudeProfileManager(),
             claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(executableOverrideURL: overrideURL),
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
             codexOAuthClaudeBridgeManager: RecordingResolverCodexOAuthClaudeBridgeManager()
         )
 
@@ -440,6 +452,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
                 credential: .providerAPIKey(try ProviderAPIKeyCredential(apiKey: "key-\(preset.id)").validated()),
                 claudeProfileManager: ResolverClaudeProfileManager(),
                 claudePatchedRuntimeManager: ResolverPatchedRuntimeManager(),
+                copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
                 codexOAuthClaudeBridgeManager: bridgeManager
             )
 
@@ -492,6 +505,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
                 appPaths: paths,
                 authPayload: nil,
                 providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "key-\(preset.id)").validated(),
+                copilotCredential: nil,
+                copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
                 openAICompatibleProviderCodexBridgeManager: bridgeManager,
                 claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
             )
@@ -544,6 +559,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
                 appPaths: paths,
                 authPayload: nil,
                 providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "key-\(preset.id)").validated(),
+                copilotCredential: nil,
+                copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
                 openAICompatibleProviderCodexBridgeManager: bridgeManager,
                 claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
             )
@@ -601,6 +618,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
                 appPaths: paths,
                 authPayload: nil,
                 providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "key-\(preset.id)").validated(),
+                copilotCredential: nil,
+                copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
                 openAICompatibleProviderCodexBridgeManager: RecordingResolverOpenAICompatibleProviderBridgeManager(),
                 claudeProviderCodexBridgeManager: bridgeManager
             )
@@ -759,6 +778,22 @@ private struct ResolverOpenAICompatibleProviderBridgeManager: OpenAICompatiblePr
             baseURL: "http://127.0.0.1:18082",
             apiKeyEnvName: "OPENAI_API_KEY",
             apiKey: "openai-compatible-provider-bridge"
+        )
+    }
+}
+
+private struct ResolverCopilotResponsesBridgeManager: CopilotResponsesBridgeManaging {
+    func prepareBridge(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String,
+        availableModels: [String],
+        workingDirectoryURL: URL
+    ) async throws -> PreparedCopilotResponsesBridge {
+        PreparedCopilotResponsesBridge(
+            baseURL: "http://127.0.0.1:18083",
+            apiKeyEnvName: "OPENAI_API_KEY",
+            apiKey: "github-copilot-bridge"
         )
     }
 }

@@ -62,6 +62,7 @@ enum AddAccountMode: String, CaseIterable, Identifiable {
     case chatgptBrowser
     case claudeProfile
     case providerAPIKey
+    case githubCopilot
 
     var id: String { rawValue }
 
@@ -73,6 +74,8 @@ enum AddAccountMode: String, CaseIterable, Identifiable {
             return L10n.tr("导入当前 Claude Profile")
         case .providerAPIKey:
             return L10n.tr("API Key Provider")
+        case .githubCopilot:
+            return L10n.tr("GitHub Copilot")
         }
     }
 }
@@ -102,6 +105,7 @@ final class AppViewModel: ObservableObject {
     @Published var browserCallbackInput = ""
     @Published var apiKeyInput = ""
     @Published var apiKeyDisplayName = ""
+    @Published var copilotHostInput = "https://github.com"
     @Published var addAccountProviderRule: ProviderRule = .openAICompatible
     @Published var addAccountProviderPresetID = "openai"
     @Published var addAccountProviderDisplayName = ""
@@ -129,6 +133,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var launchingIsolatedInstanceAccountID: UUID?
     @Published private(set) var launchedIsolatedInstanceAccountIDs: Set<UUID> = []
     @Published private(set) var launchingCLIAccountID: UUID?
+    @Published private(set) var pendingCopilotConfigDirectoryName: String?
 
     let paths: AppPaths
     let sessionLogger: AppSessionLogger?
@@ -138,8 +143,10 @@ final class AppViewModel: ObservableObject {
     private let authFileManager: any AuthFileManaging
     private let jwtDecoder: JWTClaimsDecoder
     private let oauthClient: any OAuthClienting
+    private let terminalCommandLauncher: any TerminalCommandLaunching
     private let claudeProfileManager: any ClaudeProfileManaging
     private let claudeAPIClient: any ClaudeAPIClienting
+    private let copilotStatusRefresher: any CopilotStatusRefreshing
     private let quotaMonitor: any QuotaMonitoring
     private let userNotifier: any UserNotifying
     private let runtimeInspector: any CodexRuntimeInspecting
@@ -150,12 +157,15 @@ final class AppViewModel: ObservableObject {
     private let claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging
     private let appSupportPathRepairer: any AppSupportPathRepairing
     private let codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
+    private let copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging
     private let openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging
     private let claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     private let runtimes: [PlatformKind: any PlatformRuntime]
     private let bannerAutoDismissDuration: Duration
     private var browserSession: BrowserOAuthSession?
     private var browserWaitTask: Task<Void, Never>?
+    private var copilotImportTask: Task<Void, Never>?
+    private var pendingCopilotHost: String?
     private var bannerDismissTask: Task<Void, Never>?
     private var hasLoaded = false
     private var isReconcilingCurrentAuth = false
@@ -171,8 +181,10 @@ final class AppViewModel: ObservableObject {
         authFileManager: any AuthFileManaging,
         jwtDecoder: JWTClaimsDecoder,
         oauthClient: any OAuthClienting,
+        terminalCommandLauncher: any TerminalCommandLaunching = TerminalCommandLauncher(),
         claudeProfileManager: any ClaudeProfileManaging,
         claudeAPIClient: any ClaudeAPIClienting,
+        copilotStatusRefresher: any CopilotStatusRefreshing,
         quotaMonitor: any QuotaMonitoring,
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
@@ -183,6 +195,7 @@ final class AppViewModel: ObservableObject {
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = ClaudePatchedRuntimeManager(),
         appSupportPathRepairer: any AppSupportPathRepairing = AppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = CodexOAuthClaudeBridgeManager(),
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = OpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = ClaudeProviderCodexBridgeManager(),
         platformRuntimes: [any PlatformRuntime] = [CodexPlatformRuntime(), ClaudePlatformRuntime()],
@@ -195,8 +208,10 @@ final class AppViewModel: ObservableObject {
         self.authFileManager = authFileManager
         self.jwtDecoder = jwtDecoder
         self.oauthClient = oauthClient
+        self.terminalCommandLauncher = terminalCommandLauncher
         self.claudeProfileManager = claudeProfileManager
         self.claudeAPIClient = claudeAPIClient
+        self.copilotStatusRefresher = copilotStatusRefresher
         self.quotaMonitor = quotaMonitor
         self.userNotifier = userNotifier
         self.runtimeInspector = runtimeInspector
@@ -207,6 +222,7 @@ final class AppViewModel: ObservableObject {
         self.claudePatchedRuntimeManager = claudePatchedRuntimeManager
         self.appSupportPathRepairer = appSupportPathRepairer
         self.codexOAuthClaudeBridgeManager = codexOAuthClaudeBridgeManager
+        self.copilotResponsesBridgeManager = copilotResponsesBridgeManager
         self.openAICompatibleProviderCodexBridgeManager = openAICompatibleProviderCodexBridgeManager
         self.claudeProviderCodexBridgeManager = claudeProviderCodexBridgeManager
         self.runtimes = Dictionary(uniqueKeysWithValues: platformRuntimes.map { ($0.platform, $0) })
@@ -236,6 +252,8 @@ final class AppViewModel: ObservableObject {
             let oauthClient = OAuthClient()
             let claudeProfileManager = ClaudeProfileSnapshotManager(paths: paths)
             let claudeAPIClient = ClaudeAPIClient()
+            let terminalCommandLauncher = TerminalCommandLauncher()
+            let copilotStatusRefresher = CopilotStatusRefresher(paths: paths)
             let logReader = SQLiteLogReader(databaseURL: paths.stateDatabaseURL)
             sessionLogger?.info(
                 "quota_monitor.init",
@@ -259,8 +277,10 @@ final class AppViewModel: ObservableObject {
                 authFileManager: authFileManager,
                 jwtDecoder: jwtDecoder,
                 oauthClient: oauthClient,
+                terminalCommandLauncher: terminalCommandLauncher,
                 claudeProfileManager: claudeProfileManager,
                 claudeAPIClient: claudeAPIClient,
+                copilotStatusRefresher: copilotStatusRefresher,
                 quotaMonitor: quotaMonitor,
                 userNotifier: userNotifier,
                 runtimeInspector: runtimeInspector,
@@ -270,6 +290,7 @@ final class AppViewModel: ObservableObject {
                 claudePatchedRuntimeManager: ClaudePatchedRuntimeManager(),
                 appSupportPathRepairer: AppSupportPathRepairer(),
                 codexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManager(),
+                copilotResponsesBridgeManager: CopilotResponsesBridgeManager(paths: paths),
                 openAICompatibleProviderCodexBridgeManager: OpenAICompatibleProviderCodexBridgeManager(),
                 claudeProviderCodexBridgeManager: ClaudeProviderCodexBridgeManager(),
                 platformRuntimes: [CodexPlatformRuntime(), ClaudePlatformRuntime()]
@@ -355,6 +376,11 @@ final class AppViewModel: ObservableObject {
             return L10n.tr("保存并激活供应商")
         case .claudeProfile:
             return L10n.tr("导入并激活 Claude Profile")
+        case .githubCopilot:
+            if pendingCopilotConfigDirectoryName != nil {
+                return L10n.tr("立即检查并导入 Copilot")
+            }
+            return L10n.tr("打开 Terminal 登录 Copilot")
         }
     }
 
@@ -472,7 +498,7 @@ final class AppViewModel: ObservableObject {
             return !(account.isActive && account.authKind == .chatgpt) && !hasLaunchedIsolatedInstance(for: account.id)
         case .openAICompatible:
             return !hasLaunchedIsolatedInstance(for: account.id)
-        case .claudeCompatible, .claudeProfile:
+        case .claudeCompatible, .claudeProfile, .githubCopilot:
             return false
         }
     }
@@ -487,6 +513,17 @@ final class AppViewModel: ObservableObject {
 
     func claudeRateLimitSnapshot(for accountID: UUID) -> ClaudeRateLimitSnapshot? {
         database.claudeRateLimitSnapshot(for: accountID)
+    }
+
+    func copilotQuotaSnapshot(for accountID: UUID) -> CopilotQuotaSnapshot? {
+        database.copilotQuotaSnapshot(for: accountID)
+    }
+
+    func copilotManagedConfigPath(for accountID: UUID) -> String? {
+        guard let credential = try? credentialStore.load(for: accountID).copilotCredential else {
+            return nil
+        }
+        return paths.copilotManagedConfigDirectoryURL(named: credential.configDirectoryName).path
     }
 
     func cliWorkingDirectories(for accountID: UUID) -> [String] {
@@ -521,6 +558,7 @@ final class AppViewModel: ObservableObject {
         resetAddAccountTransientState()
         addAccountSheetMode = .create
         addAccountMode = .chatgptBrowser
+        copilotHostInput = "https://github.com"
         addAccountProviderRule = .openAICompatible
         applyProviderPreset(ProviderCatalog.preset(id: "openai"))
         addAccountStatus = selectedAddAccountMessage
@@ -757,6 +795,8 @@ final class AppViewModel: ObservableObject {
             await launchChatGPTIsolatedCodex(for: account)
         case .openAICompatible:
             await launchProviderIsolatedCodex(for: account)
+        case .githubCopilot:
+            pushBanner(level: .warning, message: L10n.tr("GitHub Copilot 账号当前只支持直接打开 Codex CLI 或 Claude Code。"))
         case .claudeCompatible, .claudeProfile:
             pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
         }
@@ -820,6 +860,8 @@ final class AppViewModel: ObservableObject {
                 appPaths: paths,
                 authPayload: nil,
                 providerAPIKeyCredential: credential,
+                copilotCredential: nil,
+                copilotResponsesBridgeManager: copilotResponsesBridgeManager,
                 openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
                 claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
             )
@@ -926,6 +968,8 @@ final class AppViewModel: ObservableObject {
                 appPaths: paths,
                 authPayload: nil,
                 providerAPIKeyCredential: credential,
+                copilotCredential: nil,
+                copilotResponsesBridgeManager: copilotResponsesBridgeManager,
                 openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
                 claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
             )
@@ -1078,6 +1122,53 @@ final class AppViewModel: ObservableObject {
         isAuthenticating = false
     }
 
+    func startCopilotLogin() async {
+        guard addAccountMode == .githubCopilot else {
+            addAccountError = nil
+            addAccountStatus = selectedAddAccountMessage
+            return
+        }
+
+        addAccountError = nil
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+
+        do {
+            if let pendingCopilotConfigDirectoryName {
+                copilotImportTask?.cancel()
+                try await importPendingCopilotLogin(configDirectoryName: pendingCopilotConfigDirectoryName)
+                return
+            }
+
+            let configDirectoryName = UUID().uuidString
+            let managedRootURL = paths.copilotManagedRootURL(named: configDirectoryName)
+            let configDirectoryURL = paths.copilotManagedConfigDirectoryURL(named: configDirectoryName)
+            try FileManager.default.createDirectory(at: configDirectoryURL, withIntermediateDirectories: true)
+
+            let trimmedHost = copilotHostInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedHost = trimmedHost.isEmpty ? "https://github.com" : trimmedHost
+            let transcriptURL = managedRootURL.appendingPathComponent("login.typescript", isDirectory: false)
+            let successMarkerURL = managedRootURL.appendingPathComponent("login.success", isDirectory: false)
+            var command = "rm -f \(shellQuoted(transcriptURL.path)) \(shellQuoted(successMarkerURL.path))"
+            command += " && script -q \(shellQuoted(transcriptURL.path)) copilot login --config-dir \(shellQuoted(configDirectoryURL.path))"
+            if !trimmedHost.isEmpty {
+                command += " --host \(shellQuoted(trimmedHost))"
+            }
+            command += " && touch \(shellQuoted(successMarkerURL.path))"
+
+            try terminalCommandLauncher.launch(command: command)
+            pendingCopilotConfigDirectoryName = configDirectoryName
+            pendingCopilotHost = resolvedHost
+            addAccountStatus = L10n.tr("Terminal 已打开。完成 Copilot 登录后，Orbit 会自动导入；如果没有自动完成，也可以点击底部按钮立即检查。")
+            waitForCopilotLoginImport(configDirectoryName: configDirectoryName)
+        } catch {
+            addAccountError = error.localizedDescription
+            addAccountStatus = L10n.tr("GitHub Copilot 登录流程启动失败。")
+            database.appendLog(level: .error, message: L10n.tr("GitHub Copilot 登录流程启动失败：%@", error.localizedDescription))
+            try? await persistDatabase()
+        }
+    }
+
     func switchToAccount(_ account: ManagedAccount) async {
         guard !isSwitchInProgress else { return }
         switchingAccountID = account.id
@@ -1087,18 +1178,18 @@ final class AppViewModel: ObservableObject {
         pendingRestartPromptMessage = nil
 
         do {
-            switch account.providerRule {
-            case .chatgptOAuth:
-                let payload = try await latestPayloadForSwitch(for: account)
-                try authFileManager.activatePreservingFileIdentity(payload)
-            case .claudeProfile:
-                let credential = try latestCredential(for: account)
-                if let snapshotRef = credential.claudeProfileSnapshotRef {
-                    try claudeProfileManager.activateProfile(snapshotRef)
-                }
-            case .openAICompatible, .claudeCompatible:
-                break
+        switch account.providerRule {
+        case .chatgptOAuth:
+            let payload = try await latestPayloadForSwitch(for: account)
+            try authFileManager.activatePreservingFileIdentity(payload)
+        case .claudeProfile:
+            let credential = try latestCredential(for: account)
+            if let snapshotRef = credential.claudeProfileSnapshotRef {
+                try claudeProfileManager.activateProfile(snapshotRef)
             }
+        case .openAICompatible, .claudeCompatible, .githubCopilot:
+            break
+        }
             setActiveAccount(account.id)
             selectedAccountID = account.id
             database.appendLog(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
@@ -1155,6 +1246,12 @@ final class AppViewModel: ObservableObject {
             try credentialStore.delete(for: accountID)
             if case let .claudeProfile(snapshotRef)? = credential {
                 try claudeProfileManager.deleteProfile(snapshotRef)
+            }
+            if case let .copilot(copilotCredential)? = credential {
+                let managedRootURL = paths.copilotManagedRootURL(named: copilotCredential.configDirectoryName)
+                if FileManager.default.fileExists(atPath: managedRootURL.path) {
+                    try FileManager.default.removeItem(at: managedRootURL)
+                }
             }
             if account.isActive {
                 if clearCurrentAuth, account.platform == .codex {
@@ -1277,6 +1374,88 @@ final class AppViewModel: ObservableObject {
         dismissAddAccountSheet()
     }
 
+    private func importPendingCopilotLogin(configDirectoryName: String) async throws {
+        let configuration = try resolveCopilotLoginConfiguration(configDirectoryName: configDirectoryName)
+        let credential = try configuration.makeCredential(configDirectoryName: configDirectoryName)
+        let preferredDisplayName = apiKeyDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identity = resolveCopilotIdentity(
+            from: credential,
+            preferredDisplayName: preferredDisplayName.isEmpty ? nil : preferredDisplayName
+        )
+        try await finalizeCopilotLogin(identity: identity, credential: credential)
+    }
+
+    private func resolveCopilotLoginConfiguration(configDirectoryName: String) throws -> CopilotCLIConfiguration {
+        let configDirectoryURL = paths.copilotManagedConfigDirectoryURL(named: configDirectoryName)
+        do {
+            return try CopilotCLIConfiguration.load(from: configDirectoryURL)
+        } catch let error as CopilotCLIConfigurationError {
+            guard let configuration = try transcriptBackedCopilotConfiguration(configDirectoryName: configDirectoryName) else {
+                throw error
+            }
+            try configuration.write(to: configDirectoryURL)
+            return configuration
+        }
+    }
+
+    private func transcriptBackedCopilotConfiguration(configDirectoryName: String) throws -> CopilotCLIConfiguration? {
+        let managedRootURL = paths.copilotManagedRootURL(named: configDirectoryName)
+        let successMarkerURL = managedRootURL.appendingPathComponent("login.success", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: successMarkerURL.path) else {
+            return nil
+        }
+
+        let transcriptURL = managedRootURL.appendingPathComponent("login.typescript", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: transcriptURL.path) else {
+            throw CopilotCLIConfigurationError.missingConfiguration
+        }
+
+        let transcript = try String(contentsOf: transcriptURL, encoding: .utf8)
+        let sanitizedTranscript = transcript.unicodeScalars
+            .filter { $0 == "\n" || $0 == "\r" || $0.value >= 32 }
+            .map(String.init)
+            .joined()
+        let successPrefix = "Signed in successfully as "
+        guard let prefixRange = sanitizedTranscript.range(of: successPrefix) else {
+            throw CopilotCLIConfigurationError.noLoggedInUser
+        }
+
+        let loginSuffix = sanitizedTranscript[prefixRange.upperBound...]
+        guard let periodIndex = loginSuffix.firstIndex(of: ".") else {
+            throw CopilotCLIConfigurationError.invalidConfiguration
+        }
+
+        let rawIdentity = String(loginSuffix[..<periodIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let login = String(rawIdentity.split(separator: "(", maxSplits: 1).first ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !login.isEmpty else {
+            throw CopilotCLIConfigurationError.invalidConfiguration
+        }
+
+        let fallbackModel = try? CopilotCLIConfiguration.load(from: CopilotCLIConfiguration.defaultConfigDirectoryURL()).defaultModel
+        let trimmedDefaultModel = addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CopilotCLIConfiguration(
+            host: pendingCopilotHost ?? "https://github.com",
+            login: login,
+            defaultModel: fallbackModel ?? (trimmedDefaultModel.isEmpty ? nil : trimmedDefaultModel)
+        )
+    }
+
+    private func finalizeCopilotLogin(
+        identity: AuthIdentity,
+        credential: CopilotCredential
+    ) async throws {
+        let account = upsertCopilotAccount(identity: identity, credential: credential, makeActive: false)
+        try credentialStore.save(.copilot(credential), for: account.id)
+        setActiveAccount(account.id)
+        selectedAccountID = account.id
+        pendingCopilotConfigDirectoryName = nil
+        database.appendLog(level: .info, message: L10n.tr("已登录并激活账号 %@。", account.displayName))
+        try await persistDatabase()
+        pushBanner(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
+        dismissAddAccountSheet()
+    }
+
     private func saveEditedProvider(accountID: UUID) async {
         guard let existingAccount = database.account(id: accountID), canEditProviderAccount(existingAccount) else {
             addAccountError = L10n.tr("只能编辑 Provider API Key 账号。")
@@ -1376,7 +1555,7 @@ final class AppViewModel: ObservableObject {
                 email: validatedPayload.credentialSummary,
                 planType: nil
             )
-        case .claudeProfile, .anthropicAPIKey, .providerAPIKey:
+        case .claudeProfile, .anthropicAPIKey, .providerAPIKey, .githubCopilot:
             throw CodexAuthPayloadError.unsupportedAuthMode
         }
     }
@@ -1431,6 +1610,21 @@ final class AppViewModel: ObservableObject {
         let fallbackDisplayName = suffix.isEmpty
             ? L10n.tr("%@ API Key", providerTitle)
             : L10n.tr("%@ API Key • %@", providerTitle, suffix)
+        return AuthIdentity(
+            accountID: credential.accountIdentifier,
+            displayName: preferredDisplayName ?? fallbackDisplayName,
+            email: credential.credentialSummary,
+            planType: nil
+        )
+    }
+
+    private func resolveCopilotIdentity(
+        from credential: CopilotCredential,
+        preferredDisplayName: String? = nil
+    ) -> AuthIdentity {
+        let fallbackDisplayName = credential.login.isEmpty
+            ? L10n.tr("GitHub Copilot")
+            : L10n.tr("GitHub Copilot • %@", credential.login)
         return AuthIdentity(
             accountID: credential.accountIdentifier,
             displayName: preferredDisplayName ?? fallbackDisplayName,
@@ -1555,6 +1749,41 @@ final class AppViewModel: ObservableObject {
         return account
     }
 
+    private func upsertCopilotAccount(
+        identity: AuthIdentity,
+        credential: CopilotCredential,
+        makeActive: Bool
+    ) -> ManagedAccount {
+        let existing = database.accounts.first(where: { $0.accountIdentifier == identity.accountID })
+        let account = ManagedAccount(
+            id: existing?.id ?? UUID(),
+            platform: .codex,
+            accountIdentifier: identity.accountID,
+            displayName: existing?.displayName ?? identity.displayName,
+            email: identity.email ?? existing?.email,
+            authKind: .githubCopilot,
+            providerRule: .githubCopilot,
+            providerPresetID: nil,
+            providerDisplayName: "GitHub Copilot",
+            providerBaseURL: nil,
+            providerAPIKeyEnvName: nil,
+            defaultModel: credential.defaultModel ?? existing?.defaultModel,
+            defaultCLITarget: existing?.defaultCLITarget ?? .codex,
+            createdAt: existing?.createdAt ?? Date(),
+            lastUsedAt: existing?.lastUsedAt,
+            lastQuotaSnapshotAt: existing?.lastQuotaSnapshotAt,
+            lastRefreshAt: existing?.lastRefreshAt,
+            planType: existing?.planType,
+            subscriptionDetails: existing?.subscriptionDetails,
+            lastStatusCheckAt: existing?.lastStatusCheckAt,
+            lastStatusMessage: existing?.lastStatusMessage,
+            lastStatusLevel: existing?.lastStatusLevel,
+            isActive: makeActive
+        )
+        database.upsert(account: account)
+        return account
+    }
+
     @discardableResult
     private func refreshAccountStatus(accountID: UUID, showBanner: Bool) async -> AccountStatusRefreshOutcome {
         guard !refreshingAccountIDs.contains(accountID), let currentAccount = database.account(id: accountID) else {
@@ -1574,6 +1803,12 @@ final class AppViewModel: ObservableObject {
                     accountID: accountID,
                     showBanner: showBanner,
                     startedAt: startedAt
+                )
+            case .githubCopilot:
+                return try await refreshCopilotAccountStatus(
+                    currentAccount,
+                    accountID: accountID,
+                    showBanner: showBanner
                 )
             case .claudeProfile, .claudeCompatible:
                 return try await refreshClaudeAccountStatus(
@@ -1778,9 +2013,50 @@ final class AppViewModel: ObservableObject {
             database.appendLog(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
             try await persistDatabase()
             return .success
-        case .codex:
+        case .codex, .copilot:
             throw CredentialStoreError.unexpectedData
         }
+    }
+
+    private func refreshCopilotAccountStatus(
+        _ currentAccount: ManagedAccount,
+        accountID: UUID,
+        showBanner: Bool
+    ) async throws -> AccountStatusRefreshOutcome {
+        guard let credential = try latestCredential(for: currentAccount).copilotCredential else {
+            throw CredentialStoreError.unexpectedData
+        }
+
+        let status = try await copilotStatusRefresher.fetchStatus(using: credential)
+        let resolvedModel = status.currentModel ?? status.availableModels.first
+        if let resolvedModel,
+           let index = database.accounts.firstIndex(where: { $0.id == accountID })
+        {
+            database.accounts[index].defaultModel = resolvedModel
+        }
+        if let quotaSnapshot = status.quotaSnapshot {
+            database.updateCopilotQuotaSnapshot(quotaSnapshot, for: accountID)
+        }
+
+        let message: String
+        if let resolvedModel {
+            message = L10n.tr("GitHub Copilot 已验证：默认模型 %@。", resolvedModel)
+        } else {
+            message = L10n.tr("GitHub Copilot 本地登录态可用。")
+        }
+        updateStatusMetadata(
+            for: accountID,
+            level: .info,
+            message: message,
+            checkedAt: Date(),
+            planType: currentAccount.planType
+        )
+        if showBanner {
+            banner = BannerState(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
+        }
+        database.appendLog(level: .info, message: L10n.tr("已手动更新账号 %@ 的状态。", currentAccount.displayName))
+        try await persistDatabase()
+        return .success
     }
 
     private func latestCredential(for account: ManagedAccount) throws -> StoredCredential {
@@ -1840,6 +2116,7 @@ final class AppViewModel: ObservableObject {
     ) async throws -> ResolvedCodexCLILaunchContext {
         var payload: CodexAuthPayload?
         var providerCredential: ProviderAPIKeyCredential?
+        var copilotCredential: CopilotCredential?
 
         if account.providerRule == .chatgptOAuth {
             if account.isActive,
@@ -1867,6 +2144,8 @@ final class AppViewModel: ObservableObject {
             }
         } else if account.authKind == .providerAPIKey {
             providerCredential = try latestCredential(for: account).providerAPIKeyCredential
+        } else if account.providerRule == .githubCopilot {
+            copilotCredential = try latestCredential(for: account).copilotCredential
         }
 
         return try await cliEnvironmentResolver.resolveCodexContext(
@@ -1875,6 +2154,8 @@ final class AppViewModel: ObservableObject {
             appPaths: paths,
             authPayload: payload,
             providerAPIKeyCredential: providerCredential,
+            copilotCredential: copilotCredential,
+            copilotResponsesBridgeManager: copilotResponsesBridgeManager,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
         )
@@ -1884,7 +2165,10 @@ final class AppViewModel: ObservableObject {
         for account: ManagedAccount,
         workingDirectoryURL: URL
     ) async throws -> ResolvedClaudeCLILaunchContext {
-        let credential = account.providerRule == .claudeProfile || account.providerRule == .claudeCompatible || account.authKind == .providerAPIKey
+        let credential = account.providerRule == .claudeProfile
+            || account.providerRule == .claudeCompatible
+            || account.providerRule == .githubCopilot
+            || account.authKind == .providerAPIKey
             ? try latestCredential(for: account)
             : nil
         let codexAuthPayload = try await latestCodexPayloadForClaudeLaunch(for: account)
@@ -1897,6 +2181,7 @@ final class AppViewModel: ObservableObject {
             credential: credential,
             claudeProfileManager: claudeProfileManager,
             claudePatchedRuntimeManager: claudePatchedRuntimeManager,
+            copilotResponsesBridgeManager: copilotResponsesBridgeManager,
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager
         )
     }
@@ -2123,6 +2408,36 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func waitForCopilotLoginImport(configDirectoryName: String) {
+        copilotImportTask?.cancel()
+        copilotImportTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.copilotImportTask = nil }
+
+            while !Task.isCancelled {
+                do {
+                    try await self.importPendingCopilotLogin(configDirectoryName: configDirectoryName)
+                    return
+                } catch let error as CopilotCLIConfigurationError {
+                    guard !Task.isCancelled else { return }
+                    switch error {
+                    case .missingConfiguration, .noLoggedInUser, .invalidConfiguration:
+                        break
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.addAccountError = error.localizedDescription
+                    self.addAccountStatus = L10n.tr("GitHub Copilot 自动导入失败。你可以点击底部按钮立即重试。")
+                    self.database.appendLog(level: .error, message: L10n.tr("GitHub Copilot 自动导入失败：%@", error.localizedDescription))
+                    try? await self.persistDatabase()
+                    return
+                }
+
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
     private func pushBanner(level: SwitchLogLevel, message: String, action: BannerAction? = nil) {
         banner = BannerState(level: level, message: message, action: action)
         database.appendLog(level: level, message: message)
@@ -2237,21 +2552,28 @@ final class AppViewModel: ObservableObject {
             return L10n.tr("新增一个 API Key Provider 账号。用户后续只需要关心打开 Codex CLI 还是 Claude Code。")
         case .claudeProfile:
             return L10n.tr("导入当前 `~/.claude` 与 `~/.claude.json`，保存为可切换的本地 Claude Profile。")
+        case .githubCopilot:
+            return L10n.tr("通过官方 `copilot login --config-dir ...` 接入 GitHub Copilot，后续用本地 ACP bridge 启动 Codex CLI 或 Claude Code。")
         }
     }
 
     private func resetAddAccountTransientState() {
         browserWaitTask?.cancel()
         browserWaitTask = nil
+        copilotImportTask?.cancel()
+        copilotImportTask = nil
         browserSession?.stop()
         browserSession = nil
         browserAuthorizeURL = nil
         browserCallbackInput = ""
         apiKeyInput = ""
         apiKeyDisplayName = ""
+        copilotHostInput = "https://github.com"
+        pendingCopilotHost = nil
         addAccountProviderDisplayName = ""
         addAccountError = nil
         isAuthenticating = false
+        pendingCopilotConfigDirectoryName = nil
     }
 
     func applyDesktopLaunchPreset(_ preset: ProviderPreset?) {
@@ -2306,5 +2628,14 @@ final class AppViewModel: ObservableObject {
         }
 
         selectedAccountID = database.accounts.first?.id
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
+        return "\"\(escaped)\""
     }
 }

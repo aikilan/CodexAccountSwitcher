@@ -758,6 +758,119 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.addAccountMode, .chatgptBrowser)
     }
 
+    func testStartCopilotLoginAutomaticallyImportsCompletedTerminalLogin() async throws {
+        let accountID = UUID()
+        let terminalCommandLauncher = RecordingTerminalCommandLauncher()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false),
+            terminalCommandLauncher: terminalCommandLauncher
+        )
+
+        await harness.model.prepare()
+        harness.model.prepareAddAccountSheet()
+        harness.model.addAccountMode = .githubCopilot
+
+        await harness.model.startCopilotLogin()
+
+        XCTAssertEqual(terminalCommandLauncher.launchedCommands.count, 1)
+        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("script -q "))
+        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("copilot login --config-dir "))
+        XCTAssertEqual(
+            harness.model.addAccountStatus,
+            L10n.tr("Terminal 已打开。完成 Copilot 登录后，Orbit 会自动导入；如果没有自动完成，也可以点击底部按钮立即检查。")
+        )
+
+        let configDirectoryName = try XCTUnwrap(harness.model.pendingCopilotConfigDirectoryName)
+        let configDirectoryURL = harness.model.paths.copilotManagedConfigDirectoryURL(named: configDirectoryName)
+        let configData = try XCTUnwrap(
+            """
+            {
+              "logged_in_users": [
+                {
+                  "host": "https://github.com",
+                  "login": "aikilan"
+                }
+              ],
+              "last_logged_in_user": {
+                "host": "https://github.com",
+                "login": "aikilan"
+              },
+              "model": "gpt-4.1"
+            }
+            """.data(using: .utf8)
+        )
+        try configData.write(to: configDirectoryURL.appendingPathComponent("config.json", isDirectory: false))
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline,
+              harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }) == nil {
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        let copilotAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }))
+        XCTAssertEqual(harness.model.accounts.count, 2)
+        XCTAssertEqual(copilotAccount.displayName, "GitHub Copilot • aikilan")
+        XCTAssertEqual(copilotAccount.email, "https://github.com/aikilan")
+        XCTAssertEqual(copilotAccount.defaultModel, "gpt-4.1")
+        XCTAssertEqual(harness.model.activeAccount?.id, copilotAccount.id)
+        XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccount.id)
+        XCTAssertNil(harness.model.pendingCopilotConfigDirectoryName)
+        XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.login, "aikilan")
+    }
+
+    func testStartCopilotLoginImportsFromTranscriptWhenManagedConfigRemainsEmpty() async throws {
+        let accountID = UUID()
+        let terminalCommandLauncher = RecordingTerminalCommandLauncher()
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false),
+            terminalCommandLauncher: terminalCommandLauncher
+        )
+
+        await harness.model.prepare()
+        harness.model.prepareAddAccountSheet()
+        harness.model.addAccountMode = .githubCopilot
+
+        await harness.model.startCopilotLogin()
+
+        XCTAssertEqual(terminalCommandLauncher.launchedCommands.count, 1)
+        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("script -q "))
+        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("login.success"))
+
+        let configDirectoryName = try XCTUnwrap(harness.model.pendingCopilotConfigDirectoryName)
+        let managedRootURL = harness.model.paths.copilotManagedRootURL(named: configDirectoryName)
+        let transcript = try XCTUnwrap("Signed in successfully as aikilan.\n".data(using: .utf8))
+        try transcript.write(to: managedRootURL.appendingPathComponent("login.typescript", isDirectory: false))
+        FileManager.default.createFile(
+            atPath: managedRootURL.appendingPathComponent("login.success", isDirectory: false).path,
+            contents: Data()
+        )
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline,
+              harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }) == nil {
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        let copilotAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }))
+        XCTAssertEqual(copilotAccount.displayName, "GitHub Copilot • aikilan")
+        XCTAssertEqual(copilotAccount.email, "https://github.com/aikilan")
+        XCTAssertEqual(harness.model.activeAccount?.id, copilotAccount.id)
+        XCTAssertEqual(
+            try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.host,
+            "https://github.com"
+        )
+    }
+
     func testProviderAPIKeyLoginDoesNotWriteCodexAuthForClaudeCompatibleAccount() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
@@ -2801,6 +2914,7 @@ final class AppViewModelTests: XCTestCase {
         runtimeInspector: MockRuntimeInspector,
         activeAccountID: UUID? = nil,
         extraSeeds: [AccountSeed] = [],
+        terminalCommandLauncher: any TerminalCommandLaunching = RecordingTerminalCommandLauncher(),
         quotaMonitor: any QuotaMonitoring = NoopQuotaMonitor(),
         userNotifier: any UserNotifying = RecordingUserNotifier(),
         instanceLauncher: any CodexInstanceLaunching = RecordingCodexInstanceLauncher(),
@@ -2904,6 +3018,7 @@ final class AppViewModelTests: XCTestCase {
             authFileManager: authFileManager,
             jwtDecoder: JWTClaimsDecoder(),
             oauthClient: oauthClient,
+            terminalCommandLauncher: terminalCommandLauncher,
             quotaMonitor: quotaMonitor,
             userNotifier: userNotifier,
             runtimeInspector: runtimeInspector,
@@ -3084,6 +3199,14 @@ private final class RecordingAuthFileManager: AuthFileManaging {
     }
 }
 
+private final class RecordingTerminalCommandLauncher: @unchecked Sendable, TerminalCommandLaunching {
+    private(set) var launchedCommands: [String] = []
+
+    func launch(command: String) throws {
+        launchedCommands.append(command)
+    }
+}
+
 private final class MockOAuthClient: @unchecked Sendable, OAuthClienting {
     let refreshResult: Result<AuthLoginResult, Error>
     let usageResult: Result<UsageRefreshResult, Error>
@@ -3207,6 +3330,8 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         appPaths: AppPaths,
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential?,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexCLILaunchContext {
@@ -3218,6 +3343,8 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         appPaths: AppPaths,
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential?,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexDesktopLaunchContext {
@@ -3242,6 +3369,7 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         credential: StoredCredential?,
         claudeProfileManager: any ClaudeProfileManaging,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     ) async throws -> ResolvedClaudeCLILaunchContext {
         throw MockError.unused

@@ -5,6 +5,7 @@ enum ProviderRule: String, Codable, CaseIterable, Identifiable, Sendable {
     case claudeProfile = "claude_profile"
     case openAICompatible = "openai_compatible"
     case claudeCompatible = "claude_compatible"
+    case githubCopilot = "github_copilot"
 
     var id: String { rawValue }
 
@@ -18,12 +19,14 @@ enum ProviderRule: String, Codable, CaseIterable, Identifiable, Sendable {
             return L10n.tr("OpenAI 兼容")
         case .claudeCompatible:
             return L10n.tr("Claude 兼容")
+        case .githubCopilot:
+            return "GitHub Copilot"
         }
     }
 
     var defaultTarget: CLIEnvironmentTarget {
         switch self {
-        case .chatgptOAuth, .openAICompatible:
+        case .chatgptOAuth, .openAICompatible, .githubCopilot:
             return .codex
         case .claudeProfile, .claudeCompatible:
             return .claude
@@ -222,6 +225,8 @@ enum ProviderCatalog {
             return L10n.tr("自定义 OpenAI Provider")
         case .claudeCompatible:
             return L10n.tr("自定义 Claude Provider")
+        case .githubCopilot:
+            return "GitHub Copilot"
         case .chatgptOAuth:
             return "ChatGPT"
         case .claudeProfile:

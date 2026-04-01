@@ -18,6 +18,7 @@ struct AppPaths: Sendable {
     let appSupportDirectoryURL: URL
     let databaseURL: URL
     let credentialCacheURL: URL
+    let copilotDirectoryURL: URL
 
     init(
         fileManager: FileManager = .default,
@@ -55,6 +56,7 @@ struct AppPaths: Sendable {
         self.appSupportDirectoryURL = appSupport
         self.databaseURL = appSupport.appendingPathComponent("accounts.json")
         self.credentialCacheURL = appSupport.appendingPathComponent("credentials-cache.json")
+        self.copilotDirectoryURL = appSupport.appendingPathComponent("copilot", isDirectory: true)
     }
 
     var codexHome: URL {
@@ -80,6 +82,16 @@ struct AppPaths: Sendable {
         case .claude:
             return claude
         }
+    }
+
+    func copilotManagedRootURL(named configDirectoryName: String) -> URL {
+        copilotDirectoryURL
+            .appendingPathComponent(configDirectoryName, isDirectory: true)
+    }
+
+    func copilotManagedConfigDirectoryURL(named configDirectoryName: String) -> URL {
+        copilotManagedRootURL(named: configDirectoryName)
+            .appendingPathComponent("config", isDirectory: true)
     }
 
     private static func resolveCodexHome(fileManager: FileManager) -> URL {

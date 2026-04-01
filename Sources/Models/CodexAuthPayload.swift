@@ -66,7 +66,7 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
             try container.encode(lastRefresh, forKey: .lastRefresh)
         case .openAIAPIKey:
             try container.encodeIfPresent(openAIAPIKey, forKey: .openAIAPIKey)
-        case .claudeProfile, .anthropicAPIKey, .providerAPIKey:
+        case .claudeProfile, .anthropicAPIKey, .providerAPIKey, .githubCopilot:
             throw CodexAuthPayloadError.unsupportedAuthMode
         }
     }
@@ -88,7 +88,7 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
                 throw CodexAuthPayloadError.missingAPIKey
             }
             return CodexAuthPayload(authMode: .openAIAPIKey, openAIAPIKey: trimmedAPIKey)
-        case .claudeProfile, .anthropicAPIKey, .providerAPIKey:
+        case .claudeProfile, .anthropicAPIKey, .providerAPIKey, .githubCopilot:
             throw CodexAuthPayloadError.unsupportedAuthMode
         }
         return self
@@ -100,7 +100,7 @@ struct CodexAuthPayload: Codable, Equatable, Sendable {
             return tokens.accountID
         case .openAIAPIKey:
             return Self.apiKeyAccountIdentifier(for: openAIAPIKey ?? "")
-        case .claudeProfile, .anthropicAPIKey, .providerAPIKey:
+        case .claudeProfile, .anthropicAPIKey, .providerAPIKey, .githubCopilot:
             return ""
         }
     }

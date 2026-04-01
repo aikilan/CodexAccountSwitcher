@@ -15,6 +15,10 @@ protocol AccountCredentialStore {
     func delete(for accountID: UUID) throws
 }
 
+protocol TerminalCommandLaunching: Sendable {
+    func launch(command: String) throws
+}
+
 protocol OAuthClienting: Sendable {
     func beginBrowserLogin(openURL: @escaping @Sendable (URL) -> Bool) async throws -> BrowserOAuthSession
     func completeBrowserLogin(session: BrowserOAuthSession) async throws -> AuthLoginResult
@@ -81,6 +85,32 @@ struct PreparedOpenAICompatibleProviderCodexBridge: Equatable, Sendable {
     let apiKey: String
 }
 
+struct CopilotAccountStatus: Equatable, Sendable {
+    let availableModels: [String]
+    let currentModel: String?
+    let quotaSnapshot: CopilotQuotaSnapshot?
+}
+
+protocol CopilotStatusRefreshing: Sendable {
+    func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus
+}
+
+struct PreparedCopilotResponsesBridge: Equatable, Sendable {
+    let baseURL: String
+    let apiKeyEnvName: String
+    let apiKey: String
+}
+
+protocol CopilotResponsesBridgeManaging: Sendable {
+    func prepareBridge(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String,
+        availableModels: [String],
+        workingDirectoryURL: URL
+    ) async throws -> PreparedCopilotResponsesBridge
+}
+
 protocol ClaudeProviderCodexBridgeManaging: Sendable {
     func prepareBridge(
         accountID: UUID,
@@ -134,6 +164,8 @@ protocol CLIEnvironmentResolving: Sendable {
         appPaths: AppPaths,
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential?,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexCLILaunchContext
@@ -143,6 +175,8 @@ protocol CLIEnvironmentResolving: Sendable {
         appPaths: AppPaths,
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential?,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexDesktopLaunchContext
@@ -155,6 +189,7 @@ protocol CLIEnvironmentResolving: Sendable {
         credential: StoredCredential?,
         claudeProfileManager: any ClaudeProfileManaging,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     ) async throws -> ResolvedClaudeCLILaunchContext
 }

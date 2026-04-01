@@ -105,7 +105,7 @@ private func defaultCodexOAuthClaudeBridgeUpstreamRequest(
             url = URL(string: "https://api.openai.com/v1/responses")!
             authorizationValue = "Bearer \(apiKey)"
             accountID = nil
-        case .claudeProfile, .anthropicAPIKey, .providerAPIKey:
+        case .claudeProfile, .anthropicAPIKey, .providerAPIKey, .githubCopilot:
             throw CodexOAuthClaudeBridgeManagerError.unsupportedAuthMode
         }
         var request = URLRequest(url: url)

@@ -79,11 +79,68 @@ struct ClaudeProfileSnapshotRef: Codable, Equatable, Sendable {
     let snapshotID: String
 }
 
+struct CopilotCredential: Codable, Equatable, Sendable {
+    let configDirectoryName: String
+    let host: String
+    let login: String
+    let defaultModel: String?
+
+    init(
+        configDirectoryName: String,
+        host: String,
+        login: String,
+        defaultModel: String? = nil
+    ) {
+        self.configDirectoryName = configDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.login = login.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDefaultModel = defaultModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.defaultModel = trimmedDefaultModel.isEmpty ? nil : trimmedDefaultModel
+    }
+
+    func validated() throws -> CopilotCredential {
+        guard !configDirectoryName.isEmpty, !host.isEmpty, !login.isEmpty else {
+            throw CopilotCredentialError.invalidConfiguration
+        }
+        return CopilotCredential(
+            configDirectoryName: configDirectoryName,
+            host: host,
+            login: login,
+            defaultModel: defaultModel
+        )
+    }
+
+    var accountIdentifier: String {
+        let normalizedHost = host.lowercased()
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .replacingOccurrences(of: "/", with: "_")
+        let normalizedLogin = login.lowercased().replacingOccurrences(of: "/", with: "_")
+        return "copilot_\(normalizedHost)_\(normalizedLogin)"
+    }
+
+    var credentialSummary: String {
+        "\(host)/\(login)"
+    }
+}
+
+enum CopilotCredentialError: LocalizedError, Equatable {
+    case invalidConfiguration
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration:
+            return L10n.tr("GitHub Copilot 配置不完整。")
+        }
+    }
+}
+
 enum StoredCredential: Codable, Equatable, Sendable {
     case codex(CodexAuthPayload)
     case claudeProfile(ClaudeProfileSnapshotRef)
     case anthropicAPIKey(AnthropicAPIKeyCredential)
     case providerAPIKey(ProviderAPIKeyCredential)
+    case copilot(CopilotCredential)
 
     private enum CodingKeys: String, CodingKey {
         case kind
@@ -91,6 +148,7 @@ enum StoredCredential: Codable, Equatable, Sendable {
         case claudeProfile
         case anthropicAPIKey
         case providerAPIKey
+        case copilot
     }
 
     private enum StoredCredentialKind: String, Codable {
@@ -98,6 +156,7 @@ enum StoredCredential: Codable, Equatable, Sendable {
         case claudeProfile = "claude_profile"
         case anthropicAPIKey = "anthropic_api_key"
         case providerAPIKey = "provider_api_key"
+        case copilot
     }
 
     init(from decoder: any Decoder) throws {
@@ -113,6 +172,8 @@ enum StoredCredential: Codable, Equatable, Sendable {
             self = .anthropicAPIKey(try container.decode(AnthropicAPIKeyCredential.self, forKey: .anthropicAPIKey).validated())
         case .providerAPIKey:
             self = .providerAPIKey(try container.decode(ProviderAPIKeyCredential.self, forKey: .providerAPIKey).validated())
+        case .copilot:
+            self = .copilot(try container.decode(CopilotCredential.self, forKey: .copilot).validated())
         }
     }
 
@@ -132,6 +193,9 @@ enum StoredCredential: Codable, Equatable, Sendable {
         case let .providerAPIKey(credential):
             try container.encode(StoredCredentialKind.providerAPIKey, forKey: .kind)
             try container.encode(try credential.validated(), forKey: .providerAPIKey)
+        case let .copilot(credential):
+            try container.encode(StoredCredentialKind.copilot, forKey: .kind)
+            try container.encode(try credential.validated(), forKey: .copilot)
         }
     }
 
@@ -145,6 +209,8 @@ enum StoredCredential: Codable, Equatable, Sendable {
             return .anthropicAPIKey
         case .providerAPIKey:
             return .providerAPIKey
+        case .copilot:
+            return .githubCopilot
         }
     }
 
@@ -158,6 +224,8 @@ enum StoredCredential: Codable, Equatable, Sendable {
             return credential.accountIdentifier
         case let .providerAPIKey(credential):
             return ProviderAPIKeyCredential.accountIdentifier(for: credential.apiKey)
+        case let .copilot(credential):
+            return credential.accountIdentifier
         }
     }
 
@@ -178,6 +246,11 @@ enum StoredCredential: Codable, Equatable, Sendable {
 
     var providerAPIKeyCredential: ProviderAPIKeyCredential? {
         guard case let .providerAPIKey(credential) = self else { return nil }
+        return credential
+    }
+
+    var copilotCredential: CopilotCredential? {
+        guard case let .copilot(credential) = self else { return nil }
         return credential
     }
 }

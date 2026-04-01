@@ -107,6 +107,7 @@ extension AppDatabase {
         version: Int,
         accounts: [ManagedAccount],
         quotaSnapshots: [String: QuotaSnapshot],
+        copilotQuotaSnapshots: [String: CopilotQuotaSnapshot] = [:],
         switchLogs: [SwitchLogEntry],
         cliWorkingDirectoriesByAccountID: [String: [String]] = [:],
         activeAccountID: UUID? = nil
@@ -122,6 +123,7 @@ extension AppDatabase {
             accounts: accounts,
             quotaSnapshots: quotaSnapshots,
             claudeRateLimitSnapshots: [:],
+            copilotQuotaSnapshots: copilotQuotaSnapshots,
             switchLogs: switchLogs,
             cliLaunchHistoryByAccountID: launchHistory,
             activeAccountID: activeAccountID
@@ -145,6 +147,16 @@ private struct NoopClaudeProfileManager: ClaudeProfileManaging {
 private struct NoopClaudeAPIClient: ClaudeAPIClienting {
     func probeStatus(using credential: AnthropicAPIKeyCredential) async throws -> ClaudeRateLimitSnapshot {
         throw NSError(domain: "test", code: 1)
+    }
+}
+
+private struct NoopTerminalCommandLauncher: TerminalCommandLaunching {
+    func launch(command: String) throws {}
+}
+
+private struct NoopCopilotStatusRefresher: CopilotStatusRefreshing {
+    func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus {
+        CopilotAccountStatus(availableModels: [], currentModel: nil, quotaSnapshot: nil)
     }
 }
 
@@ -175,6 +187,22 @@ private struct NoopCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManaging
             baseURL: "http://127.0.0.1:18080",
             apiKeyEnvName: "ANTHROPIC_API_KEY",
             apiKey: "codex-oauth-bridge"
+        )
+    }
+}
+
+private struct NoopCopilotResponsesBridgeManager: CopilotResponsesBridgeManaging {
+    func prepareBridge(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String,
+        availableModels: [String],
+        workingDirectoryURL: URL
+    ) async throws -> PreparedCopilotResponsesBridge {
+        PreparedCopilotResponsesBridge(
+            baseURL: "http://127.0.0.1:18083",
+            apiKeyEnvName: "OPENAI_API_KEY",
+            apiKey: "github-copilot-bridge"
         )
     }
 }
@@ -222,6 +250,7 @@ extension AppViewModel {
         authFileManager: any AuthFileManaging,
         jwtDecoder: JWTClaimsDecoder,
         oauthClient: any OAuthClienting,
+        terminalCommandLauncher: any TerminalCommandLaunching = NoopTerminalCommandLauncher(),
         quotaMonitor: any QuotaMonitoring,
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
@@ -232,6 +261,8 @@ extension AppViewModel {
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = NoopClaudePatchedRuntimeManager(),
         appSupportPathRepairer: any AppSupportPathRepairing = NoopAppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = NoopCodexOAuthClaudeBridgeManager(),
+        copilotStatusRefresher: any CopilotStatusRefreshing = NoopCopilotStatusRefresher(),
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = NoopCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = NoopOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = NoopClaudeProviderCodexBridgeManager(),
         bannerAutoDismissDuration: Duration = .seconds(10)
@@ -244,8 +275,10 @@ extension AppViewModel {
             authFileManager: authFileManager,
             jwtDecoder: jwtDecoder,
             oauthClient: oauthClient,
+            terminalCommandLauncher: terminalCommandLauncher,
             claudeProfileManager: NoopClaudeProfileManager(),
             claudeAPIClient: NoopClaudeAPIClient(),
+            copilotStatusRefresher: copilotStatusRefresher,
             quotaMonitor: quotaMonitor,
             userNotifier: userNotifier,
             runtimeInspector: runtimeInspector,
@@ -256,6 +289,7 @@ extension AppViewModel {
             claudePatchedRuntimeManager: claudePatchedRuntimeManager,
             appSupportPathRepairer: appSupportPathRepairer,
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
+            copilotResponsesBridgeManager: copilotResponsesBridgeManager,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration

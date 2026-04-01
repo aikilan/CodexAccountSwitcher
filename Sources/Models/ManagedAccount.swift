@@ -129,6 +129,9 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
 
 extension ManagedAccount {
     var accountListBadgeTitle: String {
+        if providerRule == .githubCopilot {
+            return "GitHub Copilot"
+        }
         if (providerRule == .openAICompatible || providerRule == .claudeCompatible),
            let preset = ProviderCatalog.preset(id: providerPresetID),
            !preset.isCustom {
@@ -171,7 +174,7 @@ extension ManagedAccount {
 
     var allowedCLITargets: [CLIEnvironmentTarget] {
         switch providerRule {
-        case .chatgptOAuth, .openAICompatible, .claudeCompatible:
+        case .chatgptOAuth, .openAICompatible, .claudeCompatible, .githubCopilot:
             return [.codex, .claude]
         case .claudeProfile:
             return [.claude]
@@ -187,7 +190,10 @@ extension ManagedAccount {
     }
 
     var supportsResponsesAPI: Bool {
-        ProviderCatalog.supportsResponsesAPI(
+        if providerRule == .githubCopilot {
+            return true
+        }
+        return ProviderCatalog.supportsResponsesAPI(
             presetID: providerPresetID,
             baseURL: resolvedProviderBaseURL
         )
@@ -291,6 +297,8 @@ extension ManagedAccount {
             return .claudeCompatible
         case .providerAPIKey:
             return .openAICompatible
+        case .githubCopilot:
+            return .githubCopilot
         }
     }
 }
@@ -327,17 +335,19 @@ struct AppDatabase: Codable, Sendable {
     var accounts: [ManagedAccount]
     var quotaSnapshots: [String: QuotaSnapshot]
     var claudeRateLimitSnapshots: [String: ClaudeRateLimitSnapshot]
+    var copilotQuotaSnapshots: [String: CopilotQuotaSnapshot] = [:]
     var switchLogs: [SwitchLogEntry]
     var cliLaunchHistoryByAccountID: [String: [CLILaunchRecord]] = [:]
     var activeAccountID: UUID?
 
-    static let currentVersion = 8
+    static let currentVersion = 9
 
     static let empty = AppDatabase(
         version: currentVersion,
         accounts: [],
         quotaSnapshots: [:],
         claudeRateLimitSnapshots: [:],
+        copilotQuotaSnapshots: [:],
         switchLogs: [],
         cliLaunchHistoryByAccountID: [:],
         activeAccountID: nil
@@ -354,6 +364,10 @@ struct AppDatabase: Codable, Sendable {
 
     func claudeRateLimitSnapshot(for accountID: UUID) -> ClaudeRateLimitSnapshot? {
         claudeRateLimitSnapshots[accountID.uuidString]
+    }
+
+    func copilotQuotaSnapshot(for accountID: UUID) -> CopilotQuotaSnapshot? {
+        copilotQuotaSnapshots[accountID.uuidString]
     }
 
     func cliWorkingDirectories(for accountID: UUID) -> [String] {
@@ -397,6 +411,7 @@ struct AppDatabase: Codable, Sendable {
         accounts.removeAll(where: { $0.id == id })
         quotaSnapshots.removeValue(forKey: id.uuidString)
         claudeRateLimitSnapshots.removeValue(forKey: id.uuidString)
+        copilotQuotaSnapshots.removeValue(forKey: id.uuidString)
         cliLaunchHistoryByAccountID.removeValue(forKey: id.uuidString)
         if activeAccountID == id {
             activeAccountID = nil
@@ -412,6 +427,13 @@ struct AppDatabase: Codable, Sendable {
     mutating func updateClaudeRateLimitSnapshot(_ snapshot: ClaudeRateLimitSnapshot, for accountID: UUID) {
         claudeRateLimitSnapshots[accountID.uuidString] = snapshot
         guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        accounts[index].lastRefreshAt = snapshot.capturedAt
+    }
+
+    mutating func updateCopilotQuotaSnapshot(_ snapshot: CopilotQuotaSnapshot, for accountID: UUID) {
+        copilotQuotaSnapshots[accountID.uuidString] = snapshot
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        accounts[index].lastQuotaSnapshotAt = snapshot.capturedAt
         accounts[index].lastRefreshAt = snapshot.capturedAt
     }
 
@@ -488,6 +510,7 @@ extension AppDatabase {
         case accounts
         case quotaSnapshots
         case claudeRateLimitSnapshots
+        case copilotQuotaSnapshots
         case switchLogs
         case cliLaunchHistoryByAccountID
         case cliWorkingDirectoriesByAccountID
@@ -502,6 +525,7 @@ extension AppDatabase {
         let accounts = try container.decodeIfPresent([ManagedAccount].self, forKey: .accounts) ?? []
         let quotaSnapshots = try container.decodeIfPresent([String: QuotaSnapshot].self, forKey: .quotaSnapshots) ?? [:]
         let claudeRateLimitSnapshots = try container.decodeIfPresent([String: ClaudeRateLimitSnapshot].self, forKey: .claudeRateLimitSnapshots) ?? [:]
+        let copilotQuotaSnapshots = try container.decodeIfPresent([String: CopilotQuotaSnapshot].self, forKey: .copilotQuotaSnapshots) ?? [:]
         let switchLogs = try container.decodeIfPresent([SwitchLogEntry].self, forKey: .switchLogs) ?? []
         let cliEnvironmentProfiles = try container.decodeIfPresent([CLIEnvironmentProfile].self, forKey: .cliEnvironmentProfiles)
             ?? CLIEnvironmentProfile.builtInProfiles
@@ -554,6 +578,7 @@ extension AppDatabase {
             accounts: migratedAccounts,
             quotaSnapshots: quotaSnapshots,
             claudeRateLimitSnapshots: claudeRateLimitSnapshots,
+            copilotQuotaSnapshots: copilotQuotaSnapshots,
             switchLogs: switchLogs,
             cliLaunchHistoryByAccountID: cliLaunchHistoryByAccountID,
             activeAccountID: activeAccountID
@@ -584,6 +609,7 @@ extension AppDatabase {
         try container.encode(accounts, forKey: .accounts)
         try container.encode(quotaSnapshots, forKey: .quotaSnapshots)
         try container.encode(claudeRateLimitSnapshots, forKey: .claudeRateLimitSnapshots)
+        try container.encode(copilotQuotaSnapshots, forKey: .copilotQuotaSnapshots)
         try container.encode(switchLogs, forKey: .switchLogs)
         try container.encode(cliLaunchHistoryByAccountID, forKey: .cliLaunchHistoryByAccountID)
         try container.encodeIfPresent(activeAccountID, forKey: .activeAccountID)

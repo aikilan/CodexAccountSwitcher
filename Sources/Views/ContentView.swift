@@ -145,6 +145,7 @@ struct ContentView: View {
                             account: account,
                             snapshot: model.snapshot(for: account.id),
                             claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
+                            copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
                             isSelected: resolvedSelectedAccountID == account.id
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -185,7 +186,7 @@ struct ContentView: View {
                 Text(L10n.tr("还没有账号"))
                     .font(.headline)
 
-                Text(L10n.tr("先新增一个账号，支持 Codex 浏览器登录 / API Key，以及 Claude Profile / Anthropic API Key。"))
+                Text(L10n.tr("先新增一个账号，支持 ChatGPT、Provider API Key、Claude Profile，以及 GitHub Copilot。"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -322,6 +323,7 @@ struct ContentView: View {
                 account: account,
                 snapshot: model.snapshot(for: account.id),
                 claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
+                copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
                 authFilePath: authFilePath,
                 onRename: { model.renameAccount(account.id, to: $0) },
                 onEditProvider: { presentEditProviderWindow(for: account.id) },
@@ -335,13 +337,16 @@ struct ContentView: View {
                 L10n.tr("还没有账号"),
                 systemImage: "person.2.slash",
                 description: Text(
-                    L10n.tr("先新增一个账号，支持 Codex 浏览器登录 / API Key，以及 Claude Profile / Anthropic API Key。")
+                    L10n.tr("先新增一个账号，支持 ChatGPT、Provider API Key、Claude Profile，以及 GitHub Copilot。")
                 )
             )
         }
     }
 
     private func configurationPathText(for account: ManagedAccount) -> String {
+        if account.providerRule == .githubCopilot {
+            return model.copilotManagedConfigPath(for: account.id) ?? model.paths.copilotDirectoryURL.path
+        }
         let platformPaths = model.paths.paths(for: account.platform)
         switch account.platform {
         case .codex:
@@ -396,6 +401,7 @@ private struct AccountListRow: View {
     let account: ManagedAccount
     let snapshot: QuotaSnapshot?
     let claudeSnapshot: ClaudeRateLimitSnapshot?
+    let copilotSnapshot: CopilotQuotaSnapshot?
     let isSelected: Bool
 
     @State private var isHovering = false
@@ -476,6 +482,8 @@ private struct AccountListRow: View {
             return account.email ?? account.resolvedProviderDisplayName
         case .claudeProfile:
             return L10n.tr("Claude Profile")
+        case .githubCopilot:
+            return account.email ?? L10n.tr("GitHub Copilot")
         }
     }
 
@@ -485,6 +493,12 @@ private struct AccountListRow: View {
         }
         if let claudeSnapshot {
             return L10n.tr("请求剩余 %@", claudeRemainingText(claudeSnapshot.requests.remaining))
+        }
+        if let chat = copilotSnapshot?.chat {
+            return L10n.tr("Chat 剩余 %@", chat.remainingPercentageText)
+        }
+        if account.providerRule == .githubCopilot {
+            return L10n.tr("本地 Copilot")
         }
         if account.providerRule == .claudeProfile {
             return L10n.tr("本地 Profile")
@@ -563,6 +577,7 @@ private struct AccountDetailView: View {
     let account: ManagedAccount
     let snapshot: QuotaSnapshot?
     let claudeSnapshot: ClaudeRateLimitSnapshot?
+    let copilotSnapshot: CopilotQuotaSnapshot?
     let authFilePath: String
     let onRename: (String) -> Void
     let onEditProvider: () -> Void
@@ -656,6 +671,8 @@ private struct AccountDetailView: View {
             return L10n.tr("Key 摘要")
         case .claudeProfile:
             return L10n.tr("Profile")
+        case .githubCopilot:
+            return L10n.tr("Host/Login")
         }
     }
 
@@ -663,7 +680,7 @@ private struct AccountDetailView: View {
         switch account.providerRule {
         case .claudeProfile:
             return L10n.tr("本地快照")
-        case .chatgptOAuth, .openAICompatible, .claudeCompatible:
+        case .chatgptOAuth, .openAICompatible, .claudeCompatible, .githubCopilot:
             return account.email ?? L10n.tr("未解析")
         }
     }
@@ -676,6 +693,8 @@ private struct AccountDetailView: View {
             return account.resolvedProviderDisplayName
         case .claudeProfile:
             return L10n.tr("本地 Profile")
+        case .githubCopilot:
+            return account.email ?? L10n.tr("GitHub Copilot")
         }
     }
 
@@ -692,10 +711,15 @@ private struct AccountDetailView: View {
             return L10n.tr("当前账号会按保存的 Claude 兼容 provider、模型和 API Key 启动。")
         case .claudeProfile:
             return L10n.tr("当前账号会直接复用已保存的本地 Claude Profile。")
+        case .githubCopilot:
+            return L10n.tr("当前账号会通过本地 Copilot ACP bridge 启动 Codex CLI 或 Claude Code。")
         }
     }
 
     private var workspaceStatusText: String? {
+        if let chat = copilotSnapshot?.chat {
+            return L10n.tr("Chat 剩余 %@", chat.remainingPercentageText)
+        }
         if let snapshot {
             return L10n.tr("剩余 %@", snapshot.remainingSummary)
         }
@@ -997,6 +1021,8 @@ private struct AccountDetailView: View {
                 return L10n.tr("打开 CLI 会直接复用当前账号保存的 Claude Profile。")
             case .claudeCompatible:
                 return L10n.tr("打开 CLI 会按当前账号的 Claude 兼容 provider、模型和 API Key 启动 Claude Code。")
+            case .githubCopilot:
+                return L10n.tr("打开 CLI 会先连到本地 Copilot Responses bridge，再复用现有 Responses -> Claude 的桥接链路。")
             case .chatgptOAuth, .openAICompatible:
                 return L10n.tr("打开 CLI 会优先使用系统 Claude Code 启动，并自动桥接当前账号的 OpenAI 兼容凭据；仅旧版 Claude Code 会回退到应用生成的 patched runtime。")
             }
@@ -1015,6 +1041,9 @@ private struct AccountDetailView: View {
             }
             if account.providerRule == .claudeCompatible {
                 return L10n.tr("打开 CLI 会先桥接当前 Claude 兼容 provider，再用独立 CODEX_HOME 启动 Codex CLI。")
+            }
+            if account.providerRule == .githubCopilot {
+                return L10n.tr("打开 CLI 会先连到本地 Copilot ACP bridge，再把 GitHub Copilot 暴露成 OpenAI Responses provider。")
             }
             return L10n.tr("打开 CLI 时会为该账号使用独立 CODEX_HOME；独立实例也会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。")
         }
@@ -1105,7 +1134,45 @@ private struct AccountDetailView: View {
             Text(account.platform == .codex ? L10n.tr("额度快照") : L10n.tr("限额快照"))
                 .font(.headline)
 
-            if account.platform == .codex {
+            if account.providerRule == .githubCopilot {
+                if let copilotSnapshot {
+                    HStack(spacing: 10) {
+                        if let chat = copilotSnapshot.chat {
+                            quotaStat(title: L10n.tr("Chat 剩余"), value: chat.remainingPercentageText)
+                        }
+                        if let completions = copilotSnapshot.completions {
+                            quotaStat(title: L10n.tr("Completions 剩余"), value: completions.remainingPercentageText)
+                        }
+                        if let premiumInteractions = copilotSnapshot.premiumInteractions {
+                            quotaStat(title: L10n.tr("Premium 剩余"), value: premiumInteractions.remainingPercentageText)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let chat = copilotSnapshot.chat {
+                            inspectorRow(L10n.tr("Chat 已用"), chat.usageSummary)
+                            inspectorRow(L10n.tr("Chat 重置"), formattedDate(chat.resetDate))
+                        }
+                        if let completions = copilotSnapshot.completions {
+                            inspectorRow(L10n.tr("Completions 已用"), completions.usageSummary)
+                            inspectorRow(L10n.tr("Completions 重置"), formattedDate(completions.resetDate))
+                        }
+                        if let premiumInteractions = copilotSnapshot.premiumInteractions {
+                            inspectorRow(L10n.tr("Premium 已用"), premiumInteractions.usageSummary)
+                            inspectorRow(L10n.tr("Premium 重置"), formattedDate(premiumInteractions.resetDate))
+                        }
+                        inspectorRow(L10n.tr("采集时间"), copilotSnapshot.capturedAt.formatted(date: .abbreviated, time: .standard))
+                    }
+                } else {
+                    Text(L10n.tr("当前还没有可用的 Copilot quota 快照；手动更新状态至少会校验本地登录态和模型列表。"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .orbitSurface(.warning)
+                }
+            } else if account.platform == .codex {
                 if let snapshot {
                     if snapshot.fiveHourWindow != nil || snapshot.weeklyWindow != nil {
                         HStack(spacing: 10) {
@@ -1388,6 +1455,8 @@ private struct AccountDetailView: View {
             return L10n.tr("手动更新会向 Anthropic 发起极小探测请求，并读取响应头中的 requests 与 token 限额。")
         case .openAICompatible, .claudeCompatible:
             return L10n.tr("手动更新只确认当前 Provider API Key 的本地凭据是否可用。")
+        case .githubCopilot:
+            return L10n.tr("手动更新会校验本地 GitHub Copilot 登录态，并刷新当前可用模型；如果后续 CLI 暴露 quota 数据，也会归档到这里。")
         }
     }
 

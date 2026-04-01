@@ -116,6 +116,8 @@ struct AddAccountSheet: View {
             providerSection
         case .claudeProfile:
             claudeProfileSection
+        case .githubCopilot:
+            copilotSection
         }
     }
 
@@ -251,6 +253,36 @@ struct AddAccountSheet: View {
         .orbitSurface(.neutral, radius: OrbitRadius.hero)
     }
 
+    private var copilotSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(AddAccountMode.githubCopilot.title)
+                .font(.title3.bold())
+
+            Text(L10n.tr("Orbit 会给每个 Copilot 账号分配独立的受管 `config-dir`。登录仍然走官方 `copilot login --config-dir ...`，完成后再导入到 Orbit。"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            TextField(L10n.tr("显示名称（可选）"), text: $model.apiKeyDisplayName)
+                .textFieldStyle(.roundedBorder)
+
+            TextField(L10n.tr("GitHub Host"), text: $model.copilotHostInput)
+                .textFieldStyle(.roundedBorder)
+
+            if model.pendingCopilotConfigDirectoryName != nil {
+                Text(L10n.tr("Terminal 登录成功后会自动导入当前受管目录；如果没有自动完成，可以点击底部按钮立即检查。"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(L10n.tr("首次点击会打开 Terminal 执行官方登录命令；登录成功后会自动导入到 Orbit。"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .orbitSurface(.neutral, radius: OrbitRadius.hero)
+    }
+
     private var footer: some View {
         HStack {
             Button(L10n.tr("取消")) {
@@ -270,6 +302,8 @@ struct AddAccountSheet: View {
                         await model.startAPIKeyLogin()
                     case .claudeProfile:
                         await model.importClaudeProfile()
+                    case .githubCopilot:
+                        await model.startCopilotLogin()
                     }
                 }
             }

@@ -345,6 +345,43 @@ enum ResponsesChatCompletionsBridge {
                     ],
                     to: &events
                 )
+            case "function_call_output":
+                let itemID = trimmedString(item["id"]) ?? "fco_\(UUID().uuidString)"
+                let callID = trimmedString(item["call_id"]) ?? itemID
+                let output = item["output"] ?? ""
+
+                appendStreamEvent(
+                    named: "response.output_item.added",
+                    payload: [
+                        "type": "response.output_item.added",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "function_call_output",
+                            "status": "in_progress",
+                            "call_id": callID,
+                            "output": "",
+                        ],
+                    ],
+                    to: &events
+                )
+                appendStreamEvent(
+                    named: "response.output_item.done",
+                    payload: [
+                        "type": "response.output_item.done",
+                        "response_id": responseID,
+                        "output_index": outputIndex,
+                        "item": [
+                            "id": itemID,
+                            "type": "function_call_output",
+                            "status": "completed",
+                            "call_id": callID,
+                            "output": output,
+                        ],
+                    ],
+                    to: &events
+                )
             default:
                 continue
             }

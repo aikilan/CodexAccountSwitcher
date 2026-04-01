@@ -3,6 +3,7 @@ import Foundation
 enum CLIEnvironmentResolverError: LocalizedError, Equatable {
     case missingCodexPayload
     case missingProviderCredential
+    case missingCopilotCredential
     case missingClaudeCredential
     case invalidProviderConfiguration
     case codexCLINotSupported
@@ -14,6 +15,8 @@ enum CLIEnvironmentResolverError: LocalizedError, Equatable {
             return L10n.tr("当前账号缺少可用的 Codex 凭据。")
         case .missingProviderCredential:
             return L10n.tr("当前账号缺少可用的 Provider API Key。")
+        case .missingCopilotCredential:
+            return L10n.tr("当前账号缺少可用的 GitHub Copilot 凭据。")
         case .missingClaudeCredential:
             return L10n.tr("当前账号缺少可用的 Claude 凭据。")
         case .invalidProviderConfiguration:
@@ -57,6 +60,8 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         appPaths: AppPaths,
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential? = nil,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = UnimplementedCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexCLILaunchContext {
@@ -148,6 +153,32 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 environmentVariables: resolvedEnvironment.environmentVariables,
                 arguments: []
             )
+        case .githubCopilot:
+            guard let copilotCredential else {
+                throw CLIEnvironmentResolverError.missingCopilotCredential
+            }
+            let resolvedEnvironment = try await resolveCopilotCodexEnvironment(
+                for: account,
+                credential: copilotCredential,
+                workingDirectoryURL: workingDirectoryURL,
+                copilotResponsesBridgeManager: copilotResponsesBridgeManager
+            )
+            let codexHomeURL = isolatedCodexHomeURL(
+                for: account.id,
+                target: .codex,
+                appSupportDirectoryURL: appPaths.appSupportDirectoryURL
+            )
+            return ResolvedCodexCLILaunchContext(
+                accountID: account.id,
+                workingDirectoryURL: workingDirectoryURL,
+                mode: .isolated,
+                codexHomeURL: codexHomeURL,
+                authPayload: nil,
+                modelCatalogSnapshot: resolvedEnvironment.modelCatalogSnapshot,
+                configFileContents: resolvedEnvironment.configFileContents,
+                environmentVariables: resolvedEnvironment.environmentVariables,
+                arguments: []
+            )
         case .claudeProfile:
             throw CLIEnvironmentResolverError.codexCLINotSupported
         }
@@ -158,6 +189,8 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         appPaths: AppPaths,
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential? = nil,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = UnimplementedCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexDesktopLaunchContext {
@@ -216,6 +249,24 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 configFileContents: resolvedEnvironment.configFileContents,
                 environmentVariables: resolvedEnvironment.environmentVariables
             )
+        case .githubCopilot:
+            guard let copilotCredential else {
+                throw CLIEnvironmentResolverError.missingCopilotCredential
+            }
+            let resolvedEnvironment = try await resolveCopilotCodexEnvironment(
+                for: account,
+                credential: copilotCredential,
+                workingDirectoryURL: fileManager.homeDirectoryForCurrentUser,
+                copilotResponsesBridgeManager: copilotResponsesBridgeManager
+            )
+            return ResolvedCodexDesktopLaunchContext(
+                accountID: account.id,
+                codexHomeURL: codexHomeURL,
+                authPayload: nil,
+                modelCatalogSnapshot: resolvedEnvironment.modelCatalogSnapshot,
+                configFileContents: resolvedEnvironment.configFileContents,
+                environmentVariables: resolvedEnvironment.environmentVariables
+            )
         case .claudeProfile:
             throw CLIEnvironmentResolverError.codexCLINotSupported
         }
@@ -229,6 +280,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         credential: StoredCredential?,
         claudeProfileManager: any ClaudeProfileManaging,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = UnimplementedCopilotResponsesBridgeManager(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     ) async throws -> ResolvedClaudeCLILaunchContext {
         switch account.providerRule {
@@ -350,6 +402,37 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                     source: .inheritCodexEnvironment,
                     model: account.resolvedDefaultModel,
                     modelProvider: provider.identifier,
+                    baseURL: bridge.baseURL,
+                    apiKeyEnvName: bridge.apiKeyEnvName,
+                    apiKey: bridge.apiKey,
+                    availableModels: availableModels
+                )
+            )
+        case .githubCopilot:
+            guard let copilotCredential = credential?.copilotCredential else {
+                throw CLIEnvironmentResolverError.missingCopilotCredential
+            }
+            let model = copilotModel(for: account, credential: copilotCredential)
+            let availableModels = mergedAvailableModels(
+                [copilotCredential.defaultModel].compactMap { $0 },
+                defaultModel: model
+            )
+            let bridge = try await copilotResponsesBridgeManager.prepareBridge(
+                accountID: account.id,
+                credential: copilotCredential,
+                model: model,
+                availableModels: availableModels,
+                workingDirectoryURL: workingDirectoryURL
+            )
+            return try resolvedBridgedClaudeContext(
+                for: account,
+                workingDirectoryURL: workingDirectoryURL,
+                appPaths: appPaths,
+                claudePatchedRuntimeManager: claudePatchedRuntimeManager,
+                provider: ClaudeResolvedProvider(
+                    source: .inheritCodexEnvironment,
+                    model: model,
+                    modelProvider: "github-copilot",
                     baseURL: bridge.baseURL,
                     apiKeyEnvName: bridge.apiKeyEnvName,
                     apiKey: bridge.apiKey,
@@ -484,6 +567,39 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         )
     }
 
+    private func resolveCopilotCodexEnvironment(
+        for account: ManagedAccount,
+        credential: CopilotCredential,
+        workingDirectoryURL: URL,
+        copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging
+    ) async throws -> ResolvedCodexProviderEnvironment {
+        let model = copilotModel(for: account, credential: credential)
+        let availableModels = mergedAvailableModels(
+            [credential.defaultModel].compactMap { $0 },
+            defaultModel: model
+        )
+        let bridge = try await copilotResponsesBridgeManager.prepareBridge(
+            accountID: account.id,
+            credential: credential,
+            model: model,
+            availableModels: availableModels,
+            workingDirectoryURL: workingDirectoryURL
+        )
+
+        return ResolvedCodexProviderEnvironment(
+            modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: availableModels),
+            configFileContents: codexConfigContents(
+                model: model,
+                modelProvider: "github-copilot",
+                providerIdentifier: "github-copilot",
+                providerDisplayName: "GitHub Copilot",
+                baseURL: bridge.baseURL,
+                envKey: bridge.apiKeyEnvName
+            ),
+            environmentVariables: [bridge.apiKeyEnvName: bridge.apiKey]
+        )
+    }
+
     private func claudeAccountRootURL(
         for account: ManagedAccount,
         credential: StoredCredential?,
@@ -500,7 +616,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             return try claudeProfileManager.prepareIsolatedProfileRoot(for: account.id, snapshotRef: snapshotRef)
         case .anthropicAPIKey(_), .providerAPIKey(_):
             return try claudeProfileManager.prepareIsolatedAPIKeyRoot(for: account.id)
-        case .codex:
+        case .codex, .copilot:
             throw CLIEnvironmentResolverError.missingClaudeCredential
         }
     }
@@ -568,6 +684,8 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             return true
         case .openAICompatible:
             return account.providerPresetID != "openai"
+        case .githubCopilot:
+            return true
         }
     }
 
@@ -595,7 +713,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             return try await fetchOpenAICompatibleModelIDs(baseURL: baseURL, apiKey: apiKey)
         case .claudeCompatible:
             return try await fetchClaudeCompatibleModelIDs(baseURL: baseURL, apiKey: apiKey)
-        case .chatgptOAuth, .claudeProfile:
+        case .chatgptOAuth, .claudeProfile, .githubCopilot:
             return []
         }
     }
@@ -705,6 +823,18 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             throw CLIEnvironmentResolverError.invalidProviderConfiguration
         }
         return (identifier, displayName, baseURL, apiKeyEnvName)
+    }
+
+    private func copilotModel(for account: ManagedAccount, credential: CopilotCredential) -> String {
+        let resolved = account.resolvedDefaultModel
+        if !resolved.isEmpty {
+            return resolved
+        }
+        let credentialModel = credential.defaultModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !credentialModel.isEmpty {
+            return credentialModel
+        }
+        return "gpt-5.3-codex"
     }
 
     private func providerIdentifier(for account: ManagedAccount) -> String {
