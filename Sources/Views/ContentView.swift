@@ -17,6 +17,7 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var draggedAccountID: UUID?
     @State private var dropTargetAccountID: UUID?
+    @State private var hoveredAccountID: UUID?
 
     var body: some View {
         HSplitView {
@@ -141,25 +142,45 @@ struct ContentView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(model.accounts) { account in
-                    Button {
-                        model.selectedAccountID = account.id
-                    } label: {
-                        AccountListRow(
-                            account: account,
-                            snapshot: model.snapshot(for: account.id),
-                            claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
-                            copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
-                            isSelected: resolvedSelectedAccountID == account.id,
-                            isDropTarget: dropTargetAccountID == account.id,
-                            showsReorderHandle: model.accounts.count > 1
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                    ZStack(alignment: .trailing) {
+                        Button {
+                            model.selectedAccountID = account.id
+                        } label: {
+                            AccountListRow(
+                                account: account,
+                                snapshot: model.snapshot(for: account.id),
+                                claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
+                                copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
+                                isSelected: resolvedSelectedAccountID == account.id,
+                                isDropTarget: dropTargetAccountID == account.id,
+                                isHovering: hoveredAccountID == account.id,
+                                showsReorderHandle: model.accounts.count > 1
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if model.accounts.count > 1 {
+                            Image(systemName: "line.3.horizontal")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.secondary)
+                                .opacity(reorderHandleOpacity(for: account.id))
+                                .padding(.trailing, 12)
+                                .contentShape(Rectangle())
+                                .allowsHitTesting(shouldShowReorderHandle(for: account.id))
+                                .onDrag {
+                                    draggedAccountID = account.id
+                                    return NSItemProvider(object: account.id.uuidString as NSString)
+                                }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .onDrag {
-                        draggedAccountID = account.id
-                        return NSItemProvider(object: account.id.uuidString as NSString)
+                    .onHover { hovering in
+                        if hovering {
+                            hoveredAccountID = account.id
+                        } else if hoveredAccountID == account.id {
+                            hoveredAccountID = nil
+                        }
                     }
                     .onDrop(
                         of: [UTType.plainText],
@@ -394,6 +415,14 @@ struct ContentView: View {
         model.openEditProvider(for: accountID)
         presentWindow(id: "add-account")
     }
+
+    private func shouldShowReorderHandle(for accountID: UUID) -> Bool {
+        hoveredAccountID == accountID || draggedAccountID == accountID
+    }
+
+    private func reorderHandleOpacity(for accountID: UUID) -> Double {
+        shouldShowReorderHandle(for: accountID) ? 0.82 : 0
+    }
 }
 
 private struct AccountPlatformBadge: View {
@@ -424,9 +453,9 @@ private struct AccountListRow: View {
     let copilotSnapshot: CopilotQuotaSnapshot?
     let isSelected: Bool
     let isDropTarget: Bool
+    let isHovering: Bool
     let showsReorderHandle: Bool
 
-    @State private var isHovering = false
     @State private var isHoveringFailureIcon = false
 
     var body: some View {
@@ -447,12 +476,6 @@ private struct AccountListRow: View {
                         .background(OrbitPalette.successSoft, in: Capsule())
                 }
                 AccountPlatformBadge(title: account.accountListBadgeTitle)
-
-                Image(systemName: "line.3.horizontal")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .opacity(showsReorderHandle ? (isHovering || isDropTarget ? 0.82 : 0.24) : 0)
-                    .frame(width: 12)
             }
 
             Text(accountSubtitle)
@@ -479,7 +502,8 @@ private struct AccountListRow: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, 12)
+        .padding(.trailing, showsReorderHandle ? 30 : 12)
         .padding(.vertical, 11)
         .background(backgroundColor, in: RoundedRectangle(cornerRadius: OrbitRadius.panel, style: .continuous))
         .overlay(
@@ -497,9 +521,6 @@ private struct AccountListRow: View {
         }
         .animation(.easeOut(duration: 0.14), value: isSelected)
         .animation(.easeOut(duration: 0.12), value: isHovering)
-        .onHover { hovering in
-            isHovering = hovering
-        }
     }
 
     private var accountSubtitle: String {
