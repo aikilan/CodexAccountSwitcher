@@ -160,6 +160,32 @@ private struct NoopCopilotStatusRefresher: CopilotStatusRefreshing {
     }
 }
 
+struct NoopCopilotProvider: CopilotProviderServing {
+    func importCredential(host: String, defaultModel: String?) async throws -> CopilotCredential {
+        throw NSError(domain: "test", code: 1)
+    }
+
+    func resolveCredential(_ credential: CopilotCredential) async throws -> CopilotCredential {
+        credential
+    }
+
+    func startDeviceLogin(host: String, defaultModel: String?) async throws -> CopilotDeviceLoginChallenge {
+        throw NSError(domain: "test", code: 1)
+    }
+
+    func completeDeviceLogin(_ challenge: CopilotDeviceLoginChallenge) async throws -> CopilotCredential {
+        throw NSError(domain: "test", code: 1)
+    }
+
+    func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus {
+        CopilotAccountStatus(availableModels: [], currentModel: nil, quotaSnapshot: nil)
+    }
+
+    func sendChatCompletions(using credential: CopilotCredential, body: Data) async throws -> (statusCode: Int, data: Data) {
+        throw NSError(domain: "test", code: 1)
+    }
+}
+
 private struct NoopClaudeCLILauncher: ClaudeCLILaunching {
     func launchCLI(context: ResolvedClaudeCLILaunchContext) throws {}
 }
@@ -251,6 +277,7 @@ extension AppViewModel {
         jwtDecoder: JWTClaimsDecoder,
         oauthClient: any OAuthClienting,
         terminalCommandLauncher: any TerminalCommandLaunching = NoopTerminalCommandLauncher(),
+        openExternalURL: @escaping (URL) -> Void = { _ in },
         quotaMonitor: any QuotaMonitoring,
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
@@ -261,6 +288,7 @@ extension AppViewModel {
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging = NoopClaudePatchedRuntimeManager(),
         appSupportPathRepairer: any AppSupportPathRepairing = NoopAppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = NoopCodexOAuthClaudeBridgeManager(),
+        copilotProvider: any CopilotProviderServing = NoopCopilotProvider(),
         copilotStatusRefresher: any CopilotStatusRefreshing = NoopCopilotStatusRefresher(),
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = NoopCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = NoopOpenAICompatibleProviderCodexBridgeManager(),
@@ -276,8 +304,10 @@ extension AppViewModel {
             jwtDecoder: jwtDecoder,
             oauthClient: oauthClient,
             terminalCommandLauncher: terminalCommandLauncher,
+            openExternalURL: openExternalURL,
             claudeProfileManager: NoopClaudeProfileManager(),
             claudeAPIClient: NoopClaudeAPIClient(),
+            copilotProvider: copilotProvider,
             copilotStatusRefresher: copilotStatusRefresher,
             quotaMonitor: quotaMonitor,
             userNotifier: userNotifier,

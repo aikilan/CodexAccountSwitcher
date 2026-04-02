@@ -91,6 +91,39 @@ struct CopilotAccountStatus: Equatable, Sendable {
     let quotaSnapshot: CopilotQuotaSnapshot?
 }
 
+struct CopilotDeviceLoginChallenge: Equatable, Sendable {
+    let host: String
+    let deviceCode: String
+    let userCode: String
+    let verificationURL: URL
+    let expiresInSeconds: Int
+    let intervalSeconds: Int
+    let defaultModel: String?
+}
+
+protocol CopilotProviderServing: Sendable {
+    func importCredential(
+        host: String,
+        defaultModel: String?
+    ) async throws -> CopilotCredential
+
+    func resolveCredential(_ credential: CopilotCredential) async throws -> CopilotCredential
+
+    func startDeviceLogin(
+        host: String,
+        defaultModel: String?
+    ) async throws -> CopilotDeviceLoginChallenge
+
+    func completeDeviceLogin(_ challenge: CopilotDeviceLoginChallenge) async throws -> CopilotCredential
+
+    func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus
+
+    func sendChatCompletions(
+        using credential: CopilotCredential,
+        body: Data
+    ) async throws -> (statusCode: Int, data: Data)
+}
+
 protocol CopilotStatusRefreshing: Sendable {
     func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus
 }
@@ -152,7 +185,7 @@ protocol UserNotifying: Sendable {
 }
 
 protocol CodexRuntimeInspecting: Sendable {
-    func isCodexDesktopRunning() -> Bool
+    func hasRunningMainApplication() async -> Bool
     func verifySwitch(after date: Date, timeoutSeconds: TimeInterval) async -> SwitchVerificationResult
     func restartCodex() async throws
 }
@@ -165,6 +198,7 @@ protocol CLIEnvironmentResolving: Sendable {
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
         copilotCredential: CopilotCredential?,
+        copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -176,6 +210,7 @@ protocol CLIEnvironmentResolving: Sendable {
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
         copilotCredential: CopilotCredential?,
+        copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -189,6 +224,7 @@ protocol CLIEnvironmentResolving: Sendable {
         credential: StoredCredential?,
         claudeProfileManager: any ClaudeProfileManaging,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     ) async throws -> ResolvedClaudeCLILaunchContext

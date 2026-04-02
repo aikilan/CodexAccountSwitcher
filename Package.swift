@@ -21,6 +21,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Network"),
+                .linkedFramework("Security"),
                 .linkedLibrary("sqlite3"),
             ]
         ),

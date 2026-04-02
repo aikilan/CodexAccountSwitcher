@@ -102,6 +102,190 @@ final class AppViewModelTests: XCTestCase {
         )
     }
 
+    func testSwitchToAccountRestartRecommendedWithoutMainInstanceOmitsRestartAction() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(result: .restartRecommended, isRunning: false)
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.switchToAccount(account)
+
+        XCTAssertNil(harness.model.banner?.action)
+        XCTAssertFalse(harness.model.shouldOfferRestartCodex(for: account))
+        XCTAssertFalse(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertNil(harness.model.restartPromptMessage)
+    }
+
+    func testRestartVisibilityUsesCachedRuntimeState() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(result: .verified, isRunning: true)
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector,
+            activeAccountID: accountID
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+        let callCountAfterPrepare = runtimeInspector.hasRunningMainApplicationCallCount
+
+        XCTAssertTrue(harness.model.canQuickRestartCodex)
+        XCTAssertTrue(harness.model.canOperateMainCodexInstance(for: account))
+        XCTAssertTrue(harness.model.canOperateFocusedMainCodexInstance)
+        XCTAssertFalse(harness.model.shouldOfferRestartCodex(for: account))
+        XCTAssertEqual(harness.model.mainCodexInstanceActionTitle, L10n.tr("重启 Codex 主实例"))
+        XCTAssertEqual(harness.model.mainCodexInstanceActionInProgressTitle, L10n.tr("正在重启主实例..."))
+        XCTAssertEqual(runtimeInspector.hasRunningMainApplicationCallCount, callCountAfterPrepare)
+
+        runtimeInspector.setIsRunning(false)
+        await harness.model.performBannerAction(.restartCodex)
+
+        XCTAssertFalse(harness.model.canQuickRestartCodex)
+        XCTAssertEqual(harness.model.mainCodexInstanceActionTitle, L10n.tr("启动 Codex 主实例"))
+        XCTAssertEqual(harness.model.mainCodexInstanceActionInProgressTitle, L10n.tr("正在启动主实例..."))
+    }
+
+    func testMainCodexInstanceActionRequiresActiveCodexAccount() async throws {
+        let accountID = UUID()
+        let inactiveAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_active", refreshToken: "refresh_active")
+        let inactivePayload = makePayload(accountID: "acct_inactive", refreshToken: "refresh_inactive")
+
+        let inactiveCodexAccount = ManagedAccount(
+            id: inactiveAccountID,
+            platform: .codex,
+            codexAccountID: inactivePayload.accountIdentifier,
+            displayName: "Inactive Codex",
+            email: "inactive@example.com",
+            authMode: inactivePayload.authMode,
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        let activeClaudeAccount = makeProviderAccount(
+            id: UUID(),
+            platform: .claude,
+            identifier: "claude_active",
+            displayName: "Claude Active",
+            email: "claude@example.com",
+            rule: .claudeCompatible,
+            presetID: "claude",
+            providerDisplayName: "Claude",
+            baseURL: "https://api.anthropic.com",
+            envName: "ANTHROPIC_API_KEY",
+            model: "claude-sonnet-4",
+            isActive: true
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified, isRunning: true),
+            activeAccountID: accountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: inactiveCodexAccount,
+                    payload: .codex(inactivePayload),
+                    snapshot: nil
+                )
+            ]
+        )
+
+        await harness.model.prepare()
+        let activeCodexAccount: ManagedAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == accountID }))
+        let loadedInactiveCodexAccount: ManagedAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == inactiveAccountID }))
+
+        XCTAssertTrue(harness.model.canOperateMainCodexInstance(for: activeCodexAccount))
+        XCTAssertFalse(harness.model.canOperateMainCodexInstance(for: loadedInactiveCodexAccount))
+        XCTAssertFalse(harness.model.canOperateMainCodexInstance(for: activeClaudeAccount))
+    }
+
+    func testRestartActionKeepsSwitchStateStableAcrossAwaitBoundaries() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(
+            result: .authError(.refreshTokenReused),
+            isRunning: true,
+            hasRunningMainApplicationDelay: .milliseconds(50),
+            restartDelay: .milliseconds(50),
+            runningStateAfterRestart: false
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector,
+            activeAccountID: accountID
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.switchToAccount(account)
+
+        XCTAssertEqual(harness.model.banner?.action, .restartCodex)
+        XCTAssertEqual(harness.model.restartRecommendedAccountID, account.id)
+        XCTAssertTrue(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertNotNil(harness.model.pendingRestartPromptMessage)
+
+        let actionTask = Task { @MainActor in
+            await harness.model.performBannerAction(.restartCodex)
+        }
+
+        for _ in 0..<20 {
+            if harness.model.isRestartingCodex {
+                break
+            }
+            await Task.yield()
+        }
+
+        XCTAssertTrue(harness.model.isRestartingCodex)
+        XCTAssertEqual(harness.model.restartRecommendedAccountID, account.id)
+        XCTAssertTrue(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertNotNil(harness.model.pendingRestartPromptMessage)
+        XCTAssertEqual(harness.model.banner?.action, .restartCodex)
+
+        await actionTask.value
+
+        XCTAssertEqual(runtimeInspector.restartCallCount, 1)
+        XCTAssertFalse(harness.model.isRestartingCodex)
+        XCTAssertNil(harness.model.restartRecommendedAccountID)
+        XCTAssertFalse(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertNil(harness.model.pendingRestartPromptMessage)
+        XCTAssertFalse(harness.model.hasRunningMainCodexDesktop)
+        XCTAssertEqual(harness.model.banner?.level, .info)
+        XCTAssertNil(harness.model.banner?.action)
+        XCTAssertEqual(
+            harness.model.banner?.message,
+            L10n.tr("已请求重启 Codex，新的授权信息会在应用恢复后重新加载。")
+        )
+    }
+
     func testRefreshAccountStatusFormatsQuotaAsRemainingPercent() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
@@ -164,6 +348,81 @@ final class AppViewModelTests: XCTestCase {
         )
         XCTAssertEqual(refreshedAccount.subscriptionDetails?.allowed, true)
         XCTAssertEqual(refreshedAccount.subscriptionDetails?.limitReached, false)
+    }
+
+    func testRefreshCopilotAccountStatusUsesLiveModelWhenStoredModelIsStale() async throws {
+        let accountID = UUID()
+        let copilotAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-5.3-codex",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential),
+            statusResult: .success(
+                CopilotAccountStatus(
+                    availableModels: ["gpt-4.1", "gpt-4o"],
+                    currentModel: "gpt-4.1",
+                    quotaSnapshot: nil
+                )
+            )
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-5.3-codex",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: false
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotProvider: copilotProvider
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+
+        await harness.model.refreshAccountStatus(account)
+
+        let providerSnapshot = await copilotProvider.snapshot()
+        let refreshedAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+        XCTAssertEqual(providerSnapshot.resolveCallCount, 1)
+        XCTAssertEqual(providerSnapshot.fetchStatusCallCount, 1)
+        XCTAssertEqual(refreshedAccount.defaultModel, "gpt-4.1")
+        XCTAssertEqual(refreshedAccount.lastStatusMessage, L10n.tr("GitHub Copilot 已验证：默认模型 %@。", "gpt-4.1"))
     }
 
     func testReconcileCurrentAuthStateAlignsActiveAccountWithAuthFile() async throws {
@@ -758,9 +1017,20 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.addAccountMode, .chatgptBrowser)
     }
 
-    func testStartCopilotLoginAutomaticallyImportsCompletedTerminalLogin() async throws {
+    func testStartCopilotLoginImportsLocalCredentialWithoutTerminal() async throws {
         let accountID = UUID()
         let terminalCommandLauncher = RecordingTerminalCommandLauncher()
+        let copilotProvider = RecordingCopilotProvider(
+            importResult: .success(
+                CopilotCredential(
+                    host: "https://github.com",
+                    login: "aikilan",
+                    accessToken: "copilot_access_token",
+                    defaultModel: "gpt-4.1",
+                    source: .localImport
+                )
+            )
+        )
 
         let harness = try await makeHarness(
             accountID: accountID,
@@ -768,7 +1038,8 @@ final class AppViewModelTests: XCTestCase {
             authFileManager: RecordingAuthFileManager(),
             oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
             runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false),
-            terminalCommandLauncher: terminalCommandLauncher
+            terminalCommandLauncher: terminalCommandLauncher,
+            copilotProvider: copilotProvider
         )
 
         await harness.model.prepare()
@@ -777,55 +1048,50 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.startCopilotLogin()
 
-        XCTAssertEqual(terminalCommandLauncher.launchedCommands.count, 1)
-        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("script -q "))
-        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("copilot login --config-dir "))
-        XCTAssertEqual(
-            harness.model.addAccountStatus,
-            L10n.tr("Terminal 已打开。完成 Copilot 登录后，Orbit 会自动导入；如果没有自动完成，也可以点击底部按钮立即检查。")
-        )
-
-        let configDirectoryName = try XCTUnwrap(harness.model.pendingCopilotConfigDirectoryName)
-        let configDirectoryURL = harness.model.paths.copilotManagedConfigDirectoryURL(named: configDirectoryName)
-        let configData = try XCTUnwrap(
-            """
-            {
-              "logged_in_users": [
-                {
-                  "host": "https://github.com",
-                  "login": "aikilan"
-                }
-              ],
-              "last_logged_in_user": {
-                "host": "https://github.com",
-                "login": "aikilan"
-              },
-              "model": "gpt-4.1"
-            }
-            """.data(using: .utf8)
-        )
-        try configData.write(to: configDirectoryURL.appendingPathComponent("config.json", isDirectory: false))
-
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline,
-              harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }) == nil {
-            try await Task.sleep(nanoseconds: 200_000_000)
-        }
-
         let copilotAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }))
+        let snapshot = await copilotProvider.snapshot()
+
+        XCTAssertEqual(snapshot.importCallCount, 1)
+        XCTAssertEqual(snapshot.startDeviceLoginCallCount, 0)
+        XCTAssertEqual(snapshot.completeDeviceLoginCallCount, 0)
+        XCTAssertTrue(terminalCommandLauncher.launchedCommands.isEmpty)
         XCTAssertEqual(harness.model.accounts.count, 2)
         XCTAssertEqual(copilotAccount.displayName, "GitHub Copilot • aikilan")
         XCTAssertEqual(copilotAccount.email, "https://github.com/aikilan")
         XCTAssertEqual(copilotAccount.defaultModel, "gpt-4.1")
         XCTAssertEqual(harness.model.activeAccount?.id, copilotAccount.id)
         XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccount.id)
-        XCTAssertNil(harness.model.pendingCopilotConfigDirectoryName)
         XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.login, "aikilan")
+        XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.accessToken, "copilot_access_token")
+        XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.source, .localImport)
     }
 
-    func testStartCopilotLoginImportsFromTranscriptWhenManagedConfigRemainsEmpty() async throws {
+    func testStartCopilotLoginFallsBackToBrowserAuthorizationWhenImportFails() async throws {
         let accountID = UUID()
         let terminalCommandLauncher = RecordingTerminalCommandLauncher()
+        let challenge = CopilotDeviceLoginChallenge(
+            host: "https://github.com",
+            deviceCode: "device-code",
+            userCode: "ABCD-EFGH",
+            verificationURL: URL(string: "https://github.com/login/device")!,
+            expiresInSeconds: 900,
+            intervalSeconds: 1,
+            defaultModel: nil
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            importResult: .failure(CopilotProviderError.upstream("404 page not found")),
+            startDeviceLoginChallenge: challenge,
+            completeDeviceLoginResult: .success(
+                CopilotCredential(
+                    host: "https://github.com",
+                    login: "aikilan",
+                    accessToken: "device_access_token",
+                    defaultModel: nil,
+                    source: .orbitOAuth
+                )
+            )
+        )
+        var openedURLs = [URL]()
 
         let harness = try await makeHarness(
             accountID: accountID,
@@ -833,7 +1099,9 @@ final class AppViewModelTests: XCTestCase {
             authFileManager: RecordingAuthFileManager(),
             oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
             runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false),
-            terminalCommandLauncher: terminalCommandLauncher
+            terminalCommandLauncher: terminalCommandLauncher,
+            openExternalURL: { openedURLs.append($0) },
+            copilotProvider: copilotProvider
         )
 
         await harness.model.prepare()
@@ -842,33 +1110,22 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.startCopilotLogin()
 
-        XCTAssertEqual(terminalCommandLauncher.launchedCommands.count, 1)
-        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("script -q "))
-        XCTAssertTrue(terminalCommandLauncher.launchedCommands[0].contains("login.success"))
-
-        let configDirectoryName = try XCTUnwrap(harness.model.pendingCopilotConfigDirectoryName)
-        let managedRootURL = harness.model.paths.copilotManagedRootURL(named: configDirectoryName)
-        let transcript = try XCTUnwrap("Signed in successfully as aikilan.\n".data(using: .utf8))
-        try transcript.write(to: managedRootURL.appendingPathComponent("login.typescript", isDirectory: false))
-        FileManager.default.createFile(
-            atPath: managedRootURL.appendingPathComponent("login.success", isDirectory: false).path,
-            contents: Data()
-        )
-
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline,
-              harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }) == nil {
-            try await Task.sleep(nanoseconds: 200_000_000)
-        }
-
         let copilotAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.providerRule == .githubCopilot }))
+        let snapshot = await copilotProvider.snapshot()
+
+        XCTAssertEqual(snapshot.importCallCount, 1)
+        XCTAssertEqual(snapshot.startDeviceLoginCallCount, 1)
+        XCTAssertEqual(snapshot.completeDeviceLoginCallCount, 1)
+        XCTAssertEqual(snapshot.lastDeviceLoginHost, "https://github.com")
+        XCTAssertEqual(snapshot.lastCompletedChallenge, challenge)
+        XCTAssertEqual(openedURLs, [challenge.verificationURL])
+        XCTAssertTrue(terminalCommandLauncher.launchedCommands.isEmpty)
         XCTAssertEqual(copilotAccount.displayName, "GitHub Copilot • aikilan")
         XCTAssertEqual(copilotAccount.email, "https://github.com/aikilan")
         XCTAssertEqual(harness.model.activeAccount?.id, copilotAccount.id)
-        XCTAssertEqual(
-            try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.host,
-            "https://github.com"
-        )
+        XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccount.id)
+        XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.host, "https://github.com")
+        XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.source, .orbitOAuth)
     }
 
     func testProviderAPIKeyLoginDoesNotWriteCodexAuthForClaudeCompatibleAccount() async throws {
@@ -2027,6 +2284,88 @@ final class AppViewModelTests: XCTestCase {
         )
     }
 
+    func testCopilotAccountOpensCodexCLIUsingLiveModelCatalog() async throws {
+        let accountID = UUID()
+        let copilotAccountID = UUID()
+        let codexCLILauncher = RecordingCodexCLILauncher()
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-5.3-codex",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential),
+            statusResult: .success(
+                CopilotAccountStatus(
+                    availableModels: ["gpt-4.1", "gpt-4o"],
+                    currentModel: "gpt-4.1",
+                    quotaSnapshot: nil
+                )
+            )
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: copilotAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-5.3-codex",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: true
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotProvider: copilotProvider,
+            cliLauncher: codexCLILauncher
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+
+        await harness.model.openCodexCLI(for: account, workingDirectoryURL: makeWorkingDirectoryURL("copilot-codex-live-models"))
+
+        let providerSnapshot = await copilotProvider.snapshot()
+        let refreshedAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+        XCTAssertEqual(providerSnapshot.resolveCallCount, 1)
+        XCTAssertEqual(providerSnapshot.fetchStatusCallCount, 1)
+        XCTAssertEqual(codexCLILauncher.launchCallCount, 1)
+        XCTAssertEqual(
+            codexCLILauncher.lastContext?.modelCatalogSnapshot,
+            ResolvedCodexModelCatalogSnapshot(availableModels: ["gpt-4.1", "gpt-4o"])
+        )
+        XCTAssertTrue(codexCLILauncher.lastContext?.configFileContents?.contains("model = \"gpt-4.1\"") == true)
+        XCTAssertEqual(refreshedAccount.defaultModel, "gpt-4.1")
+    }
+
     func testMoonshotProviderAccountOpensCodexCLIThroughChatCompletionsBridge() async throws {
         let accountID = UUID()
         let providerAccountID = UUID()
@@ -2445,6 +2784,86 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(launcher.lastPayload)
         XCTAssertEqual(launcher.lastContext?.environmentVariables["OPENAI_API_KEY"], "sk-test-old")
         XCTAssertTrue(launcher.lastContext?.configFileContents?.contains("model_provider = \"openai\"") == true)
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+        XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
+    }
+
+    func testLaunchIsolatedCodexSupportsGitHubCopilotAccount() async throws {
+        let accountID = UUID()
+        let copilotAccountID = UUID()
+        let launcher = RecordingCodexInstanceLauncher()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential)
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: copilotAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: true
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotProvider: copilotProvider,
+            instanceLauncher: launcher,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+
+        XCTAssertTrue(account.isActive)
+        XCTAssertTrue(harness.model.canLaunchIsolatedCodex(for: account))
+
+        await harness.model.launchIsolatedCodex(for: account)
+
+        let providerSnapshot = await copilotProvider.snapshot()
+        XCTAssertEqual(providerSnapshot.resolveCallCount, 1)
+        XCTAssertEqual(launcher.launchCallCount, 1)
+        XCTAssertNil(launcher.lastPayload)
+        XCTAssertEqual(launcher.lastContext?.accountID, copilotAccountID)
+        XCTAssertEqual(
+            launcher.lastContext?.modelCatalogSnapshot,
+            ResolvedCodexModelCatalogSnapshot(availableModels: ["gpt-4.1"])
+        )
         XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
     }
@@ -2915,6 +3334,9 @@ final class AppViewModelTests: XCTestCase {
         activeAccountID: UUID? = nil,
         extraSeeds: [AccountSeed] = [],
         terminalCommandLauncher: any TerminalCommandLaunching = RecordingTerminalCommandLauncher(),
+        openExternalURL: @escaping (URL) -> Void = { _ in },
+        copilotProvider: any CopilotProviderServing = NoopCopilotProvider(),
+        copilotStatusRefresher: (any CopilotStatusRefreshing)? = nil,
         quotaMonitor: any QuotaMonitoring = NoopQuotaMonitor(),
         userNotifier: any UserNotifying = RecordingUserNotifier(),
         instanceLauncher: any CodexInstanceLaunching = RecordingCodexInstanceLauncher(),
@@ -3019,6 +3441,7 @@ final class AppViewModelTests: XCTestCase {
             jwtDecoder: JWTClaimsDecoder(),
             oauthClient: oauthClient,
             terminalCommandLauncher: terminalCommandLauncher,
+            openExternalURL: openExternalURL,
             quotaMonitor: quotaMonitor,
             userNotifier: userNotifier,
             runtimeInspector: runtimeInspector,
@@ -3029,6 +3452,8 @@ final class AppViewModelTests: XCTestCase {
             claudePatchedRuntimeManager: claudePatchedRuntimeManager,
             appSupportPathRepairer: appSupportPathRepairer,
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
+            copilotProvider: copilotProvider,
+            copilotStatusRefresher: copilotStatusRefresher ?? CopilotStatusRefresher(provider: copilotProvider),
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration
@@ -3300,18 +3725,40 @@ actor RecordingUserNotifier: UserNotifying {
     }
 }
 
+@MainActor
 private final class MockRuntimeInspector: @unchecked Sendable, CodexRuntimeInspecting {
     let result: SwitchVerificationResult
-    let isRunning: Bool
+    private(set) var hasRunningMainApplicationCallCount = 0
+    private var isRunning: Bool
     private(set) var restartCallCount = 0
+    private let hasRunningMainApplicationDelay: Duration?
+    private let restartDelay: Duration?
+    private let runningStateAfterRestart: Bool?
 
-    init(result: SwitchVerificationResult, isRunning: Bool = true) {
+    init(
+        result: SwitchVerificationResult,
+        isRunning: Bool = true,
+        hasRunningMainApplicationDelay: Duration? = nil,
+        restartDelay: Duration? = nil,
+        runningStateAfterRestart: Bool? = nil
+    ) {
         self.result = result
+        self.isRunning = isRunning
+        self.hasRunningMainApplicationDelay = hasRunningMainApplicationDelay
+        self.restartDelay = restartDelay
+        self.runningStateAfterRestart = runningStateAfterRestart
+    }
+
+    func setIsRunning(_ isRunning: Bool) {
         self.isRunning = isRunning
     }
 
-    func isCodexDesktopRunning() -> Bool {
-        isRunning
+    func hasRunningMainApplication() async -> Bool {
+        hasRunningMainApplicationCallCount += 1
+        if let hasRunningMainApplicationDelay {
+            try? await Task.sleep(for: hasRunningMainApplicationDelay)
+        }
+        return isRunning
     }
 
     func verifySwitch(after date: Date, timeoutSeconds: TimeInterval) async -> SwitchVerificationResult {
@@ -3320,6 +3767,119 @@ private final class MockRuntimeInspector: @unchecked Sendable, CodexRuntimeInspe
 
     func restartCodex() async throws {
         restartCallCount += 1
+        if let restartDelay {
+            try? await Task.sleep(for: restartDelay)
+        }
+        if let runningStateAfterRestart {
+            isRunning = runningStateAfterRestart
+        }
+    }
+}
+
+private actor RecordingCopilotProvider: CopilotProviderServing {
+    struct Snapshot: Equatable {
+        let importCallCount: Int
+        let lastImportHost: String?
+        let resolveCallCount: Int
+        let lastResolvedCredential: CopilotCredential?
+        let fetchStatusCallCount: Int
+        let lastStatusCredential: CopilotCredential?
+        let startDeviceLoginCallCount: Int
+        let lastDeviceLoginHost: String?
+        let completeDeviceLoginCallCount: Int
+        let lastCompletedChallenge: CopilotDeviceLoginChallenge?
+    }
+
+    private let importResult: Result<CopilotCredential, Error>
+    private let resolveCredentialResult: Result<CopilotCredential, Error>?
+    private let startDeviceLoginChallenge: CopilotDeviceLoginChallenge?
+    private let completeDeviceLoginResult: Result<CopilotCredential, Error>
+    private let statusResult: Result<CopilotAccountStatus, Error>
+    private let sendChatCompletionsResult: Result<(Int, Data), Error>
+
+    private var importCallCount = 0
+    private var lastImportHost: String?
+    private var resolveCallCount = 0
+    private var lastResolvedCredential: CopilotCredential?
+    private var fetchStatusCallCount = 0
+    private var lastStatusCredential: CopilotCredential?
+    private var startDeviceLoginCallCount = 0
+    private var lastDeviceLoginHost: String?
+    private var completeDeviceLoginCallCount = 0
+    private var lastCompletedChallenge: CopilotDeviceLoginChallenge?
+
+    init(
+        importResult: Result<CopilotCredential, Error> = .failure(MockError.unused),
+        resolveCredentialResult: Result<CopilotCredential, Error>? = nil,
+        startDeviceLoginChallenge: CopilotDeviceLoginChallenge? = nil,
+        completeDeviceLoginResult: Result<CopilotCredential, Error> = .failure(MockError.unused),
+        statusResult: Result<CopilotAccountStatus, Error> = .success(
+            CopilotAccountStatus(availableModels: [], currentModel: nil, quotaSnapshot: nil)
+        ),
+        sendChatCompletionsResult: Result<(Int, Data), Error> = .failure(MockError.unused)
+    ) {
+        self.importResult = importResult
+        self.resolveCredentialResult = resolveCredentialResult
+        self.startDeviceLoginChallenge = startDeviceLoginChallenge
+        self.completeDeviceLoginResult = completeDeviceLoginResult
+        self.statusResult = statusResult
+        self.sendChatCompletionsResult = sendChatCompletionsResult
+    }
+
+    func importCredential(host: String, defaultModel: String?) async throws -> CopilotCredential {
+        importCallCount += 1
+        lastImportHost = host
+        return try importResult.get()
+    }
+
+    func resolveCredential(_ credential: CopilotCredential) async throws -> CopilotCredential {
+        resolveCallCount += 1
+        lastResolvedCredential = credential
+        if let resolveCredentialResult {
+            return try resolveCredentialResult.get()
+        }
+        return credential
+    }
+
+    func startDeviceLogin(host: String, defaultModel: String?) async throws -> CopilotDeviceLoginChallenge {
+        startDeviceLoginCallCount += 1
+        lastDeviceLoginHost = host
+        guard let startDeviceLoginChallenge else {
+            throw MockError.unused
+        }
+        return startDeviceLoginChallenge
+    }
+
+    func completeDeviceLogin(_ challenge: CopilotDeviceLoginChallenge) async throws -> CopilotCredential {
+        completeDeviceLoginCallCount += 1
+        lastCompletedChallenge = challenge
+        return try completeDeviceLoginResult.get()
+    }
+
+    func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus {
+        fetchStatusCallCount += 1
+        lastStatusCredential = credential
+        return try statusResult.get()
+    }
+
+    func sendChatCompletions(using credential: CopilotCredential, body: Data) async throws -> (statusCode: Int, data: Data) {
+        let result = try sendChatCompletionsResult.get()
+        return (statusCode: result.0, data: result.1)
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            importCallCount: importCallCount,
+            lastImportHost: lastImportHost,
+            resolveCallCount: resolveCallCount,
+            lastResolvedCredential: lastResolvedCredential,
+            fetchStatusCallCount: fetchStatusCallCount,
+            lastStatusCredential: lastStatusCredential,
+            startDeviceLoginCallCount: startDeviceLoginCallCount,
+            lastDeviceLoginHost: lastDeviceLoginHost,
+            completeDeviceLoginCallCount: completeDeviceLoginCallCount,
+            lastCompletedChallenge: lastCompletedChallenge
+        )
     }
 }
 
@@ -3331,6 +3891,7 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
         copilotCredential: CopilotCredential?,
+        copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -3344,6 +3905,7 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
         copilotCredential: CopilotCredential?,
+        copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -3369,6 +3931,7 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         credential: StoredCredential?,
         claudeProfileManager: any ClaudeProfileManaging,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     ) async throws -> ResolvedClaudeCLILaunchContext {

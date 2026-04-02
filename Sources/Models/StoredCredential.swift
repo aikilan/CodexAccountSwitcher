@@ -79,34 +79,54 @@ struct ClaudeProfileSnapshotRef: Codable, Equatable, Sendable {
     let snapshotID: String
 }
 
+enum CopilotCredentialSource: String, Codable, Equatable, Sendable {
+    case localImport = "local_import"
+    case orbitOAuth = "orbit_oauth"
+}
+
 struct CopilotCredential: Codable, Equatable, Sendable {
-    let configDirectoryName: String
+    let configDirectoryName: String?
     let host: String
     let login: String
+    let githubAccessToken: String?
+    let accessToken: String?
     let defaultModel: String?
+    let source: CopilotCredentialSource?
 
     init(
-        configDirectoryName: String,
+        configDirectoryName: String? = nil,
         host: String,
         login: String,
-        defaultModel: String? = nil
+        githubAccessToken: String? = nil,
+        accessToken: String? = nil,
+        defaultModel: String? = nil,
+        source: CopilotCredentialSource? = nil
     ) {
-        self.configDirectoryName = configDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedConfigDirectoryName = configDirectoryName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.configDirectoryName = trimmedConfigDirectoryName.isEmpty ? nil : trimmedConfigDirectoryName
         self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
         self.login = login.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedGitHubAccessToken = githubAccessToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.githubAccessToken = trimmedGitHubAccessToken.isEmpty ? nil : trimmedGitHubAccessToken
+        let trimmedAccessToken = accessToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.accessToken = trimmedAccessToken.isEmpty ? nil : trimmedAccessToken
         let trimmedDefaultModel = defaultModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.defaultModel = trimmedDefaultModel.isEmpty ? nil : trimmedDefaultModel
+        self.source = source
     }
 
     func validated() throws -> CopilotCredential {
-        guard !configDirectoryName.isEmpty, !host.isEmpty, !login.isEmpty else {
+        guard !host.isEmpty, !login.isEmpty else {
             throw CopilotCredentialError.invalidConfiguration
         }
         return CopilotCredential(
             configDirectoryName: configDirectoryName,
             host: host,
             login: login,
-            defaultModel: defaultModel
+            githubAccessToken: githubAccessToken,
+            accessToken: accessToken,
+            defaultModel: defaultModel,
+            source: source
         )
     }
 

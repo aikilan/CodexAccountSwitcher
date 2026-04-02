@@ -258,7 +258,7 @@ struct AddAccountSheet: View {
             Text(AddAccountMode.githubCopilot.title)
                 .font(.title3.bold())
 
-            Text(L10n.tr("Orbit 会给每个 Copilot 账号分配独立的受管 `config-dir`。登录仍然走官方 `copilot login --config-dir ...`，完成后再导入到 Orbit。"))
+            Text(L10n.tr("Orbit 会先尝试导入当前机器已有的 GitHub Copilot 登录态；如果没有可导入的授权，就会打开浏览器完成 GitHub 授权。"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -268,15 +268,9 @@ struct AddAccountSheet: View {
             TextField(L10n.tr("GitHub Host"), text: $model.copilotHostInput)
                 .textFieldStyle(.roundedBorder)
 
-            if model.pendingCopilotConfigDirectoryName != nil {
-                Text(L10n.tr("Terminal 登录成功后会自动导入当前受管目录；如果没有自动完成，可以点击底部按钮立即检查。"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(L10n.tr("首次点击会打开 Terminal 执行官方登录命令；登录成功后会自动导入到 Orbit。"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(L10n.tr("完成接入后，Codex CLI、Codex.app 和 Claude Code 都会复用 Orbit 提供的本地 GitHub provider bridge，不再依赖 `copilot` 命令。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)

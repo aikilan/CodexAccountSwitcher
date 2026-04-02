@@ -191,8 +191,10 @@
 "正在接入 API Key。" = "Setting up API Key.";
 "正在更新状态..." = "Refreshing status...";
 "正在重启" = "Restarting";
+"正在重启主实例..." = "Restarting main instance...";
 "正在重启 Codex..." = "Restarting Codex...";
 "正在重启..." = "Restarting...";
+"正在启动主实例..." = "Launching main instance...";
 "正在验证你粘贴的回调结果。" = "Verifying the callback result you pasted.";
 "正在验证热更..." = "Verifying hot reload...";
 "没有找到 ~/.codex/auth.json。" = "Could not find ~/.codex/auth.json.";
@@ -211,6 +213,7 @@
 "点击启动 %@" = "Click to Launch %@";
 "点击快速启动 CLI" = "Click to quickly launch CLI";
 "点击快速启动 %@" = "Click to quickly launch %@";
+"启动 Codex 主实例" = "Launch Codex Main Instance";
 "状态与额度已更新：剩余 %@。" = "Status and quota updated: %@ remaining.";
 "状态与额度已更新：剩余 %@，当前已触达额度限制。" = "Status and quota updated: %@ remaining, and the current quota limit has been reached.";
 "状态已更新，但额度同步失败：%@" = "Status updated, but quota sync failed: %@";
@@ -228,6 +231,7 @@
 "登录等待超时。" = "Login timed out.";
 "稍后" = "Later";
 "立即重启 Codex" = "Restart Codex Now";
+"重启 Codex 主实例" = "Restart Codex Main Instance";
 "粘贴 redirect URL 或 authorization code" = "Paste redirect URL or authorization code";
 "计划类型" = "Plan Type";
 "供应商" = "Provider";

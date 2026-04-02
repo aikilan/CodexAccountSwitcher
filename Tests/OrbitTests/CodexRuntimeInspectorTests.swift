@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import SQLite3
 import XCTest
@@ -5,6 +6,7 @@ import XCTest
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+@MainActor
 final class CodexRuntimeInspectorTests: XCTestCase {
     func testLatestRelevantSignalUsesNanosecondPrecision() throws {
         let databaseURL = try makeLogDatabase(entries: [
@@ -80,6 +82,136 @@ final class CodexRuntimeInspectorTests: XCTestCase {
         XCTAssertEqual(result, .verified)
     }
 
+    func testVerifySwitchTreatsOnlyIsolatedInstancesAsNotRunning() async throws {
+        let databaseURL = try makeLogDatabase(entries: [])
+        let inspector = CodexRuntimeInspector(
+            logReader: SQLiteLogReader(databaseURL: databaseURL),
+            runningApplications: {
+                [
+                    RunningCodexApplication(processIdentifier: 200, bundleURL: nil, terminate: { true })
+                ]
+            },
+            resolveApplicationURL: { nil },
+            isIsolatedApplication: { $0 == 200 },
+            openApplication: { _ in }
+        )
+
+        let result = await inspector.verifySwitch(after: Date(), timeoutSeconds: 0.1)
+        let hasRunningMainApplication = await inspector.hasRunningMainApplication()
+
+        XCTAssertEqual(result, .noRunningClient)
+        XCTAssertFalse(hasRunningMainApplication)
+    }
+
+    func testHasRunningMainApplicationReturnsTrueWhenMainInstanceExistsAlongsideIsolatedInstance() async throws {
+        let databaseURL = try makeLogDatabase(entries: [])
+        let inspector = CodexRuntimeInspector(
+            logReader: SQLiteLogReader(databaseURL: databaseURL),
+            runningApplications: {
+                [
+                    RunningCodexApplication(processIdentifier: 101, bundleURL: nil, terminate: { true }),
+                    RunningCodexApplication(processIdentifier: 202, bundleURL: nil, terminate: { true }),
+                ]
+            },
+            resolveApplicationURL: { nil },
+            isIsolatedApplication: { $0 == 202 },
+            openApplication: { _ in }
+        )
+
+        let hasRunningMainApplication = await inspector.hasRunningMainApplication()
+        XCTAssertTrue(hasRunningMainApplication)
+    }
+
+    func testRestartCodexSkipsIsolatedInstancesAndRelaunchesMainInstance() async throws {
+        let databaseURL = try makeLogDatabase(entries: [])
+        let appURL = URL(fileURLWithPath: "/Applications/Codex.app")
+        let state = RunningApplicationState()
+        state.applications = [
+            RunningCodexApplication(processIdentifier: 101, bundleURL: appURL, terminate: {
+                state.terminatedProcessIdentifiers.append(101)
+                state.applications.removeAll { $0.processIdentifier == 101 }
+                return true
+            }),
+            RunningCodexApplication(processIdentifier: 202, bundleURL: appURL, terminate: {
+                state.terminatedProcessIdentifiers.append(202)
+                state.applications.removeAll { $0.processIdentifier == 202 }
+                return true
+            })
+        ]
+        let inspector = CodexRuntimeInspector(
+            logReader: SQLiteLogReader(databaseURL: databaseURL),
+            runningApplications: { state.applications },
+            resolveApplicationURL: { appURL },
+            isIsolatedApplication: { $0 == 202 },
+            openApplication: { url in
+                state.openedApplicationURLs.append(url)
+            }
+        )
+
+        try await inspector.restartCodex()
+
+        XCTAssertEqual(state.terminatedProcessIdentifiers, [101])
+        XCTAssertEqual(state.openedApplicationURLs, [appURL])
+    }
+
+    func testRestartCodexLaunchesMainInstanceWhenOnlyIsolatedInstancesAreRunning() async throws {
+        let databaseURL = try makeLogDatabase(entries: [])
+        let appURL = URL(fileURLWithPath: "/Applications/Codex.app")
+        let state = RunningApplicationState()
+        state.applications = [
+            RunningCodexApplication(processIdentifier: 202, bundleURL: appURL, terminate: {
+                state.terminatedProcessIdentifiers.append(202)
+                state.applications.removeAll { $0.processIdentifier == 202 }
+                return true
+            })
+        ]
+        let inspector = CodexRuntimeInspector(
+            logReader: SQLiteLogReader(databaseURL: databaseURL),
+            runningApplications: { state.applications },
+            resolveApplicationURL: { appURL },
+            isIsolatedApplication: { _ in true },
+            openApplication: { url in
+                state.openedApplicationURLs.append(url)
+            }
+        )
+
+        try await inspector.restartCodex()
+
+        XCTAssertTrue(state.terminatedProcessIdentifiers.isEmpty)
+        XCTAssertEqual(state.openedApplicationURLs, [appURL])
+    }
+
+    func testOpenMainApplicationCompletionHandlerResumesFromBackgroundQueue() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let completionHandler = CodexRuntimeInspector.openMainApplicationCompletionHandler(continuation: continuation)
+            DispatchQueue.global().async {
+                completionHandler(nil, nil)
+            }
+        }
+    }
+
+    func testOpenMainApplicationCompletionHandlerWrapsBackgroundQueueErrors() async {
+        let underlyingError = NSError(
+            domain: "LaunchServices",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "launch failed"]
+        )
+
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let completionHandler = CodexRuntimeInspector.openMainApplicationCompletionHandler(continuation: continuation)
+                DispatchQueue.global().async {
+                    completionHandler(nil, underlyingError)
+                }
+            }
+            XCTFail("Expected relaunchFailed error")
+        } catch let error as CodexRuntimeInspectorError {
+            XCTAssertEqual(error, .relaunchFailed("launch failed"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     private func makeLogDatabase(entries: [LogEntry]) throws -> URL {
         let databaseURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).sqlite")
         var database: OpaquePointer?
@@ -142,4 +274,10 @@ private struct LogEntry {
     let level: String
     let target: String
     let message: String
+}
+
+private final class RunningApplicationState: @unchecked Sendable {
+    var applications: [RunningCodexApplication] = []
+    var terminatedProcessIdentifiers: [pid_t] = []
+    var openedApplicationURLs: [URL] = []
 }

@@ -1,27 +1,14 @@
 import Foundation
 
 struct CopilotStatusRefresher {
-    private let paths: AppPaths
+    private let provider: any CopilotProviderServing
 
-    init(paths: AppPaths) {
-        self.paths = paths
+    init(provider: any CopilotProviderServing) {
+        self.provider = provider
     }
 
     func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus {
-        let configDirectoryURL = paths.copilotManagedConfigDirectoryURL(named: credential.configDirectoryName)
-        try CopilotCLIConfiguration(
-            host: credential.host,
-            login: credential.login,
-            defaultModel: credential.defaultModel
-        ).write(to: configDirectoryURL)
-        let status = try await CopilotACPClient(configDirectoryURL: configDirectoryURL).fetchStatus(
-            workingDirectoryURL: FileManager.default.homeDirectoryForCurrentUser
-        )
-        return CopilotAccountStatus(
-            availableModels: status.availableModels,
-            currentModel: status.currentModel,
-            quotaSnapshot: nil
-        )
+        try await provider.fetchStatus(using: credential)
     }
 }
 

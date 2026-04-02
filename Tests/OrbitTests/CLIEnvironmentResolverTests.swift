@@ -253,6 +253,116 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         )
     }
 
+    func testResolveCodexContextUsesCopilotCompatibleFallbackModel() async throws {
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let bridgeManager = RecordingResolverCopilotResponsesBridgeManager()
+        let paths = try makePaths()
+        let account = ManagedAccount(
+            id: UUID(),
+            platform: .codex,
+            accountIdentifier: "copilot_github.com_aikilan",
+            displayName: "GitHub Copilot • aikilan",
+            email: "https://github.com/aikilan",
+            authKind: .githubCopilot,
+            providerRule: .githubCopilot,
+            providerPresetID: nil,
+            providerDisplayName: "GitHub Copilot",
+            providerBaseURL: nil,
+            providerAPIKeyEnvName: nil,
+            defaultModel: "gpt-5.3-codex",
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        let credential = try CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            defaultModel: "gpt-5.3-codex"
+        ).validated()
+
+        let context = try await resolver.resolveCodexContext(
+            for: account,
+            workingDirectoryURL: FileManager.default.temporaryDirectory,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: nil,
+            copilotCredential: credential,
+            copilotResponsesBridgeManager: bridgeManager,
+            openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
+            claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
+        )
+
+        let snapshot = await bridgeManager.snapshot()
+        XCTAssertEqual(snapshot.lastModel, "gpt-4.1")
+        XCTAssertEqual(snapshot.lastAvailableModels, ["gpt-4.1"])
+        XCTAssertEqual(context.modelCatalogSnapshot?.availableModels, ["gpt-4.1"])
+        XCTAssertTrue(context.configFileContents?.contains("model = \"gpt-4.1\"") == true)
+    }
+
+    func testResolveCodexContextUsesLiveCopilotModelsWhenStatusProvided() async throws {
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let bridgeManager = RecordingResolverCopilotResponsesBridgeManager()
+        let paths = try makePaths()
+        let account = ManagedAccount(
+            id: UUID(),
+            platform: .codex,
+            accountIdentifier: "copilot_github.com_aikilan",
+            displayName: "GitHub Copilot • aikilan",
+            email: "https://github.com/aikilan",
+            authKind: .githubCopilot,
+            providerRule: .githubCopilot,
+            providerPresetID: nil,
+            providerDisplayName: "GitHub Copilot",
+            providerBaseURL: nil,
+            providerAPIKeyEnvName: nil,
+            defaultModel: "gpt-5.3-codex",
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        let credential = try CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            defaultModel: "gpt-5.3-codex"
+        ).validated()
+        let status = CopilotAccountStatus(
+            availableModels: ["gpt-4.1", "gpt-4o"],
+            currentModel: "gpt-4.1",
+            quotaSnapshot: nil
+        )
+
+        let context = try await resolver.resolveCodexContext(
+            for: account,
+            workingDirectoryURL: FileManager.default.temporaryDirectory,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: nil,
+            copilotCredential: credential,
+            copilotStatus: status,
+            copilotResponsesBridgeManager: bridgeManager,
+            openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
+            claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
+        )
+
+        let snapshot = await bridgeManager.snapshot()
+        XCTAssertEqual(snapshot.lastModel, "gpt-4.1")
+        XCTAssertEqual(snapshot.lastAvailableModels, ["gpt-4.1", "gpt-4o"])
+        XCTAssertEqual(context.modelCatalogSnapshot?.availableModels, ["gpt-4.1", "gpt-4o"])
+        XCTAssertTrue(context.configFileContents?.contains("model = \"gpt-4.1\"") == true)
+    }
+
     func testResolveCodexContextSkipsPrefetchForCustomProvider() async throws {
         ResolverMockURLProtocol.requestHandler = { _ in
             XCTFail("custom provider 不应该触发模型预查询")
@@ -865,5 +975,35 @@ private actor RecordingResolverCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBr
 
     func snapshot() -> [String] {
         lastAvailableModels
+    }
+}
+
+private actor RecordingResolverCopilotResponsesBridgeManager: CopilotResponsesBridgeManaging {
+    struct Snapshot: Equatable {
+        let lastModel: String?
+        let lastAvailableModels: [String]
+    }
+
+    private var lastModel: String?
+    private var lastAvailableModels = [String]()
+
+    func prepareBridge(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String,
+        availableModels: [String],
+        workingDirectoryURL: URL
+    ) async throws -> PreparedCopilotResponsesBridge {
+        lastModel = model
+        lastAvailableModels = availableModels
+        return PreparedCopilotResponsesBridge(
+            baseURL: "http://127.0.0.1:18083",
+            apiKeyEnvName: "OPENAI_API_KEY",
+            apiKey: "github-copilot-bridge"
+        )
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(lastModel: lastModel, lastAvailableModels: lastAvailableModels)
     }
 }

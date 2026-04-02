@@ -61,6 +61,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
         copilotCredential: CopilotCredential? = nil,
+        copilotStatus: CopilotAccountStatus? = nil,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = UnimplementedCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -160,6 +161,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             let resolvedEnvironment = try await resolveCopilotCodexEnvironment(
                 for: account,
                 credential: copilotCredential,
+                status: copilotStatus,
                 workingDirectoryURL: workingDirectoryURL,
                 copilotResponsesBridgeManager: copilotResponsesBridgeManager
             )
@@ -190,6 +192,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         authPayload: CodexAuthPayload?,
         providerAPIKeyCredential: ProviderAPIKeyCredential?,
         copilotCredential: CopilotCredential? = nil,
+        copilotStatus: CopilotAccountStatus? = nil,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = UnimplementedCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
@@ -256,6 +259,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             let resolvedEnvironment = try await resolveCopilotCodexEnvironment(
                 for: account,
                 credential: copilotCredential,
+                status: copilotStatus,
                 workingDirectoryURL: fileManager.homeDirectoryForCurrentUser,
                 copilotResponsesBridgeManager: copilotResponsesBridgeManager
             )
@@ -280,6 +284,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         credential: StoredCredential?,
         claudeProfileManager: any ClaudeProfileManaging,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
+        copilotStatus: CopilotAccountStatus? = nil,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = UnimplementedCopilotResponsesBridgeManager(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     ) async throws -> ResolvedClaudeCLILaunchContext {
@@ -412,16 +417,16 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             guard let copilotCredential = credential?.copilotCredential else {
                 throw CLIEnvironmentResolverError.missingCopilotCredential
             }
-            let model = copilotModel(for: account, credential: copilotCredential)
-            let availableModels = mergedAvailableModels(
-                [copilotCredential.defaultModel].compactMap { $0 },
-                defaultModel: model
+            let launchConfiguration = copilotLaunchConfiguration(
+                for: account,
+                credential: copilotCredential,
+                status: copilotStatus
             )
             let bridge = try await copilotResponsesBridgeManager.prepareBridge(
                 accountID: account.id,
                 credential: copilotCredential,
-                model: model,
-                availableModels: availableModels,
+                model: launchConfiguration.model,
+                availableModels: launchConfiguration.availableModels,
                 workingDirectoryURL: workingDirectoryURL
             )
             return try resolvedBridgedClaudeContext(
@@ -431,12 +436,12 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 claudePatchedRuntimeManager: claudePatchedRuntimeManager,
                 provider: ClaudeResolvedProvider(
                     source: .inheritCodexEnvironment,
-                    model: model,
+                    model: launchConfiguration.model,
                     modelProvider: "github-copilot",
                     baseURL: bridge.baseURL,
                     apiKeyEnvName: bridge.apiKeyEnvName,
                     apiKey: bridge.apiKey,
-                    availableModels: availableModels
+                    availableModels: launchConfiguration.availableModels
                 )
             )
         }
@@ -570,26 +575,27 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
     private func resolveCopilotCodexEnvironment(
         for account: ManagedAccount,
         credential: CopilotCredential,
+        status: CopilotAccountStatus?,
         workingDirectoryURL: URL,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging
     ) async throws -> ResolvedCodexProviderEnvironment {
-        let model = copilotModel(for: account, credential: credential)
-        let availableModels = mergedAvailableModels(
-            [credential.defaultModel].compactMap { $0 },
-            defaultModel: model
+        let launchConfiguration = copilotLaunchConfiguration(
+            for: account,
+            credential: credential,
+            status: status
         )
         let bridge = try await copilotResponsesBridgeManager.prepareBridge(
             accountID: account.id,
             credential: credential,
-            model: model,
-            availableModels: availableModels,
+            model: launchConfiguration.model,
+            availableModels: launchConfiguration.availableModels,
             workingDirectoryURL: workingDirectoryURL
         )
 
         return ResolvedCodexProviderEnvironment(
-            modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: availableModels),
+            modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: launchConfiguration.availableModels),
             configFileContents: codexConfigContents(
-                model: model,
+                model: launchConfiguration.model,
                 modelProvider: "github-copilot",
                 providerIdentifier: "github-copilot",
                 providerDisplayName: "GitHub Copilot",
@@ -806,6 +812,43 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         return normalized
     }
 
+    private func mergedCopilotAvailableModels(_ models: [String], defaultModel: String) -> [String] {
+        mergedAvailableModels(
+            models.compactMap(normalizedCopilotBridgeModelCandidate),
+            defaultModel: normalizedCopilotBridgeModelCandidate(defaultModel) ?? "gpt-4.1"
+        )
+    }
+
+    private func copilotLaunchConfiguration(
+        for account: ManagedAccount,
+        credential: CopilotCredential,
+        status: CopilotAccountStatus?
+    ) -> (model: String, availableModels: [String]) {
+        let liveAvailableModels = (status?.availableModels ?? []).compactMap(normalizedCopilotBridgeModelCandidate)
+        let currentModel = normalizedCopilotBridgeModelCandidate(status?.currentModel)
+        let preferredModel = normalizedCopilotBridgeModelCandidate(account.defaultModel)
+        let credentialModel = normalizedCopilotBridgeModelCandidate(credential.defaultModel)
+
+        let model: String
+        if let preferredModel, liveAvailableModels.isEmpty || liveAvailableModels.contains(preferredModel) {
+            model = preferredModel
+        } else if let currentModel {
+            model = currentModel
+        } else if let firstLiveModel = liveAvailableModels.first {
+            model = firstLiveModel
+        } else if let credentialModel {
+            model = credentialModel
+        } else {
+            model = "gpt-4.1"
+        }
+
+        let availableModels = mergedCopilotAvailableModels(
+            liveAvailableModels + [currentModel, credentialModel].compactMap { $0 },
+            defaultModel: model
+        )
+        return (model, availableModels)
+    }
+
     private func validURL(_ value: String) throws -> URL {
         guard let url = URL(string: value) else {
             throw CLIEnvironmentResolverError.invalidProviderConfiguration
@@ -825,16 +868,12 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         return (identifier, displayName, baseURL, apiKeyEnvName)
     }
 
-    private func copilotModel(for account: ManagedAccount, credential: CopilotCredential) -> String {
-        let resolved = account.resolvedDefaultModel
-        if !resolved.isEmpty {
-            return resolved
+    private func normalizedCopilotBridgeModelCandidate(_ model: String?) -> String? {
+        let trimmedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedModel.isEmpty, trimmedModel != "gpt-5.3-codex" else {
+            return nil
         }
-        let credentialModel = credential.defaultModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !credentialModel.isEmpty {
-            return credentialModel
-        }
-        return "gpt-5.3-codex"
+        return trimmedModel
     }
 
     private func providerIdentifier(for account: ManagedAccount) -> String {

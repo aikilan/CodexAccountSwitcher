@@ -154,7 +154,7 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .contextMenu {
                         Button(account.isActive ? L10n.tr("当前正在使用") : L10n.tr("切换到此账号")) {
-                            Task { await model.switchToAccount(account) }
+                            Task { @MainActor in await model.switchToAccount(account) }
                         }
                         .disabled(account.isActive || model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
 
@@ -304,7 +304,7 @@ struct ContentView: View {
                     state: banner,
                     isActionInProgress: model.isRestartingCodex,
                     onAction: { action in
-                        Task { await model.performBannerAction(action) }
+                        Task { @MainActor in await model.performBannerAction(action) }
                     }
                 )
                 detailPane
@@ -328,7 +328,7 @@ struct ContentView: View {
                 onRename: { model.renameAccount(account.id, to: $0) },
                 onEditProvider: { presentEditProviderWindow(for: account.id) },
                 onRefreshStatus: { Task { await model.refreshAccountStatus(account) } },
-                onSwitch: { Task { await model.switchToAccount(account) } },
+                onSwitch: { Task { @MainActor in await model.switchToAccount(account) } },
                 onDelete: { model.requestDeleteAccount(account.id) }
             )
             .id(account.id)
@@ -694,7 +694,7 @@ private struct AccountDetailView: View {
         case .claudeProfile:
             return L10n.tr("本地 Profile")
         case .githubCopilot:
-            return account.email ?? L10n.tr("GitHub Copilot")
+            return account.email ?? L10n.tr("GitHub Provider")
         }
     }
 
@@ -712,7 +712,7 @@ private struct AccountDetailView: View {
         case .claudeProfile:
             return L10n.tr("当前账号会直接复用已保存的本地 Claude Profile。")
         case .githubCopilot:
-            return L10n.tr("当前账号会通过本地 Copilot ACP bridge 启动 Codex CLI 或 Claude Code。")
+            return L10n.tr("当前账号会通过 Orbit 的本地 GitHub provider bridge 启动 Codex CLI、Codex.app 或 Claude Code。")
         }
     }
 
@@ -892,9 +892,9 @@ private struct AccountDetailView: View {
                         .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
                     }
 
-                    if model.shouldOfferRestartCodex(for: account) {
-                        Button(model.isRestartingCodex ? L10n.tr("正在重启 Codex...") : L10n.tr("重启 Codex")) {
-                            Task { await model.performBannerAction(.restartCodex) }
+                    if model.canOperateMainCodexInstance(for: account) {
+                        Button(model.isRestartingCodex ? model.mainCodexInstanceActionInProgressTitle : model.mainCodexInstanceActionTitle) {
+                            Task { @MainActor in await model.performBannerAction(.restartCodex) }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -1022,7 +1022,7 @@ private struct AccountDetailView: View {
             case .claudeCompatible:
                 return L10n.tr("打开 CLI 会按当前账号的 Claude 兼容 provider、模型和 API Key 启动 Claude Code。")
             case .githubCopilot:
-                return L10n.tr("打开 CLI 会先连到本地 Copilot Responses bridge，再复用现有 Responses -> Claude 的桥接链路。")
+                return L10n.tr("打开 CLI 会先连到 Orbit 的本地 GitHub provider bridge，再复用现有 Responses -> Claude 的桥接链路。")
             case .chatgptOAuth, .openAICompatible:
                 return L10n.tr("打开 CLI 会优先使用系统 Claude Code 启动，并自动桥接当前账号的 OpenAI 兼容凭据；仅旧版 Claude Code 会回退到应用生成的 patched runtime。")
             }
@@ -1043,7 +1043,7 @@ private struct AccountDetailView: View {
                 return L10n.tr("打开 CLI 会先桥接当前 Claude 兼容 provider，再用独立 CODEX_HOME 启动 Codex CLI。")
             }
             if account.providerRule == .githubCopilot {
-                return L10n.tr("打开 CLI 会先连到本地 Copilot ACP bridge，再把 GitHub Copilot 暴露成 OpenAI Responses provider。")
+                return L10n.tr("打开 CLI 会先连到 Orbit 的本地 GitHub provider bridge，再把 GitHub Copilot 暴露成 OpenAI Responses provider。")
             }
             return L10n.tr("打开 CLI 时会为该账号使用独立 CODEX_HOME；独立实例也会使用独立 CODEX_HOME 和 user-data 目录启动，不会改写当前 ~/.codex。")
         }
@@ -1827,8 +1827,8 @@ struct MenuBarContentView: View {
         return (count * MenuBarPanelMetrics.estimatedAccountRowHeight) + spacing
     }
 
-    private var shouldShowStandaloneRestartAction: Bool {
-        model.focusedPlatform == .codex && model.canQuickRestartCodex && model.restartPromptMessage == nil
+    private var shouldShowStandaloneMainInstanceAction: Bool {
+        model.canOperateFocusedMainCodexInstance && model.restartPromptMessage == nil
     }
 
     private func switchButtonTitle(for account: ManagedAccount) -> String {
@@ -1861,7 +1861,7 @@ struct MenuBarContentView: View {
                         .buttonStyle(.bordered)
 
                         Button(recommendation.switchButtonTitle) {
-                            Task { await model.switchToRecommendedLowQuotaAccount() }
+                            Task { @MainActor in await model.switchToRecommendedLowQuotaAccount() }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.isSwitchInProgress)
@@ -1880,12 +1880,12 @@ struct MenuBarContentView: View {
                         .foregroundStyle(.secondary)
                     HStack {
                         Button(L10n.tr("稍后")) {
-                            model.dismissRestartPrompt()
+                            Task { @MainActor in model.dismissRestartPrompt() }
                         }
                         .buttonStyle(.bordered)
 
                         Button(model.isRestartingCodex ? L10n.tr("正在重启...") : L10n.tr("立即重启 Codex")) {
-                            Task { await model.performBannerAction(.restartCodex) }
+                            Task { @MainActor in await model.performBannerAction(.restartCodex) }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.isRestartingCodex)
@@ -1918,14 +1918,14 @@ struct MenuBarContentView: View {
                         Task { await model.refreshAllAccountStatuses() }
                     }
 
-                    if shouldShowStandaloneRestartAction {
+                    if shouldShowStandaloneMainInstanceAction {
                         quickActionButton(
-                            model.isRestartingCodex ? L10n.tr("正在重启") : L10n.tr("重启 Codex"),
+                            model.isRestartingCodex ? model.mainCodexInstanceActionInProgressTitle : model.mainCodexInstanceActionTitle,
                             systemImage: "power",
                             isProminent: true,
                             isDisabled: model.isRestartingCodex
                         ) {
-                            Task { await model.performBannerAction(.restartCodex) }
+                            Task { @MainActor in await model.performBannerAction(.restartCodex) }
                         }
                     } else {
                         quickActionButton(L10n.tr("退出应用"), systemImage: "xmark.circle") {
@@ -1934,7 +1934,7 @@ struct MenuBarContentView: View {
                     }
                 }
 
-                if shouldShowStandaloneRestartAction {
+                if shouldShowStandaloneMainInstanceAction {
                     quickActionButton(L10n.tr("退出应用"), systemImage: "xmark.circle") {
                         NSApp.terminate(nil)
                     }

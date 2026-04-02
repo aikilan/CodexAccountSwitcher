@@ -30,28 +30,73 @@ enum CodexRuntimeInspectorError: LocalizedError, Equatable {
     }
 }
 
+struct RunningCodexApplication: Sendable {
+    let processIdentifier: pid_t
+    let bundleURL: URL?
+    let terminate: @Sendable () -> Bool
+}
+
 final class CodexRuntimeInspector: @unchecked Sendable {
     private static let bundleIdentifier = "com.openai.codex"
+    private static let isolatedInstancesDirectoryName = "isolated-codex-instances"
 
     private let logReader: SQLiteLogReader
-    private let isRunningClient: @Sendable () -> Bool
+    private let runningApplications: @Sendable () async -> [RunningCodexApplication]
+    private let resolveApplicationURL: @Sendable () async -> URL?
+    private let isIsolatedApplication: @Sendable (pid_t) async -> Bool
+    private let openApplication: @Sendable (URL) async throws -> Void
+
+    init(logReader: SQLiteLogReader) {
+        self.logReader = logReader
+        self.runningApplications = {
+            await Self.liveRunningApplications()
+        }
+        self.resolveApplicationURL = {
+            await Self.mainApplicationURL()
+        }
+        self.isIsolatedApplication = Self.isolatedApplication
+        self.openApplication = { appURL in
+            try await Self.openMainApplication(at: appURL)
+        }
+    }
 
     init(
         logReader: SQLiteLogReader,
-        isRunningClient: @escaping @Sendable () -> Bool = {
-            !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
-        }
+        runningApplications: @escaping @Sendable () async -> [RunningCodexApplication],
+        resolveApplicationURL: @escaping @Sendable () async -> URL?,
+        isIsolatedApplication: @escaping @Sendable (pid_t) async -> Bool,
+        openApplication: @escaping @Sendable (URL) async throws -> Void
     ) {
         self.logReader = logReader
-        self.isRunningClient = isRunningClient
+        self.runningApplications = runningApplications
+        self.resolveApplicationURL = resolveApplicationURL
+        self.isIsolatedApplication = isIsolatedApplication
+        self.openApplication = openApplication
     }
 
-    func isCodexDesktopRunning() -> Bool {
-        isRunningClient()
+    convenience init(
+        logReader: SQLiteLogReader,
+        isRunningClient: @escaping @Sendable () -> Bool
+    ) {
+        self.init(
+            logReader: logReader,
+            runningApplications: {
+                isRunningClient()
+                    ? [RunningCodexApplication(processIdentifier: 0, bundleURL: nil, terminate: { true })]
+                    : []
+            },
+            resolveApplicationURL: { nil },
+            isIsolatedApplication: { _ in false },
+            openApplication: { _ in }
+        )
+    }
+
+    func hasRunningMainApplication() async -> Bool {
+        !(await runningMainApplications()).isEmpty
     }
 
     func verifySwitch(after date: Date, timeoutSeconds: TimeInterval = 6) async -> SwitchVerificationResult {
-        guard isCodexDesktopRunning() else {
+        guard await hasRunningMainApplication() else {
             return .noRunningClient
         }
 
@@ -85,39 +130,135 @@ final class CodexRuntimeInspector: @unchecked Sendable {
     }
 
     func restartCodex() async throws {
-        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier)
+        let runningApps = await runningApplications()
+        let mainApps = await runningMainApplications(from: runningApps)
+        let fallbackApplicationURL = await resolveApplicationURL()
         guard
-            let appURL = runningApps.first?.bundleURL
-                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleIdentifier)
+            let appURL = mainApps.first?.bundleURL
+                ?? runningApps.first?.bundleURL
+                ?? fallbackApplicationURL
         else {
             throw CodexRuntimeInspectorError.applicationNotFound
         }
 
-        for app in runningApps {
-            _ = app.terminate()
+        for app in mainApps {
+            await MainActor.run {
+                _ = app.terminate()
+            }
         }
 
-        if !runningApps.isEmpty {
+        if !mainApps.isEmpty {
             let deadline = Date().addingTimeInterval(5)
-            while isCodexDesktopRunning(), Date() < deadline {
+            while await hasRunningMainApplication(), Date() < deadline {
                 try? await Task.sleep(for: .milliseconds(250))
             }
 
-            guard !isCodexDesktopRunning() else {
+            guard !(await hasRunningMainApplication()) else {
                 throw CodexRuntimeInspectorError.gracefulShutdownTimedOut
             }
         }
 
+        try await openApplication(appURL)
+    }
+
+    private func runningMainApplications() async -> [RunningCodexApplication] {
+        let applications = await runningApplications()
+        return await runningMainApplications(from: applications)
+    }
+
+    private func runningMainApplications(from applications: [RunningCodexApplication]) async -> [RunningCodexApplication] {
+        var mainApplications: [RunningCodexApplication] = []
+        mainApplications.reserveCapacity(applications.count)
+
+        for application in applications {
+            if !(await isIsolatedApplication(application.processIdentifier)) {
+                mainApplications.append(application)
+            }
+        }
+
+        return mainApplications
+    }
+
+    @MainActor
+    private static func liveRunningApplications() -> [RunningCodexApplication] {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).map { app in
+            RunningCodexApplication(
+                processIdentifier: app.processIdentifier,
+                bundleURL: app.bundleURL,
+                terminate: { app.terminate() }
+            )
+        }
+    }
+
+    @MainActor
+    private static func mainApplicationURL() -> URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+    }
+
+    private static func isolatedApplication(processIdentifier: pid_t) async -> Bool {
+        guard let commandLine = await processCommandLine(for: processIdentifier) else {
+            return false
+        }
+
+        return commandLine.contains("--user-data-dir=")
+            && commandLine.contains("/\(isolatedInstancesDirectoryName)/")
+    }
+
+    private static func processCommandLine(for processIdentifier: pid_t) async -> String? {
+        await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/ps")
+            process.arguments = ["-ww", "-o", "command=", "-p", String(processIdentifier)]
+
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = Pipe()
+
+            do {
+                try process.run()
+            } catch {
+                return nil
+            }
+
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                return nil
+            }
+
+            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let output, !output.isEmpty else {
+                return nil
+            }
+
+            return output
+        }.value
+    }
+
+    @MainActor
+    private static func openMainApplication(at appURL: URL) async throws {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
+        configuration.createsNewApplicationInstance = true
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
-                if let error {
-                    continuation.resume(throwing: CodexRuntimeInspectorError.relaunchFailed(error.localizedDescription))
-                } else {
-                    continuation.resume(returning: ())
-                }
+            let completionHandler = openMainApplicationCompletionHandler(continuation: continuation)
+            NSWorkspace.shared.openApplication(
+                at: appURL,
+                configuration: configuration,
+                completionHandler: completionHandler
+            )
+        }
+    }
+
+    static func openMainApplicationCompletionHandler(
+        continuation: CheckedContinuation<Void, Error>
+    ) -> @Sendable (NSRunningApplication?, Error?) -> Void {
+        { _, error in
+            if let error {
+                continuation.resume(throwing: CodexRuntimeInspectorError.relaunchFailed(error.localizedDescription))
+            } else {
+                continuation.resume(returning: ())
             }
         }
     }

@@ -16,11 +16,11 @@ enum CopilotResponsesBridgeManagerError: LocalizedError, Equatable {
 }
 
 actor CopilotResponsesBridgeManager {
-    private let paths: AppPaths
+    private let provider: any CopilotProviderServing
     private var servers: [String: CopilotResponsesBridgeServer] = [:]
 
-    init(paths: AppPaths) {
-        self.paths = paths
+    init(provider: any CopilotProviderServing) {
+        self.provider = provider
     }
 
     func prepareBridge(
@@ -30,13 +30,8 @@ actor CopilotResponsesBridgeManager {
         availableModels: [String],
         workingDirectoryURL: URL
     ) async throws -> PreparedCopilotResponsesBridge {
-        try CopilotCLIConfiguration(
-            host: credential.host,
-            login: credential.login,
-            defaultModel: model
-        ).write(to: paths.copilotManagedConfigDirectoryURL(named: credential.configDirectoryName))
         let key = "\(accountID.uuidString)|\(workingDirectoryURL.standardizedFileURL.path)"
-        let server = servers[key] ?? CopilotResponsesBridgeServer(paths: paths)
+        let server = servers[key] ?? CopilotResponsesBridgeServer(provider: provider)
         server.update(
             credential: credential,
             model: model,
@@ -78,7 +73,7 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.openai.Orbit.copilot-responses-bridge")
     private let stateQueue = DispatchQueue(label: "com.openai.Orbit.copilot-responses-bridge.state")
-    private let paths: AppPaths
+    private let provider: any CopilotProviderServing
 
     private var listener: NWListener?
     private var localBaseURL: String?
@@ -88,12 +83,12 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
         login: "",
         defaultModel: nil
     )
-    private var defaultModel = "gpt-5.3-codex"
-    private var availableModels = ["gpt-5.3-codex"]
+    private var defaultModel = "gpt-4.1"
+    private var availableModels = ["gpt-4.1"]
     private var workingDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
-    init(paths: AppPaths) {
-        self.paths = paths
+    init(provider: any CopilotProviderServing) {
+        self.provider = provider
     }
 
     func update(
@@ -104,7 +99,7 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
     ) {
         stateQueue.sync {
             self.credential = credential
-            self.defaultModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "gpt-5.3-codex" : model
+            self.defaultModel = normalizedModelCandidate(model) ?? "gpt-4.1"
             self.availableModels = normalizedAvailableModels(availableModels, fallbackModel: self.defaultModel)
             self.workingDirectoryURL = workingDirectoryURL.standardizedFileURL
         }
@@ -266,15 +261,29 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
             let state = currentState()
             let requestObject = try requestJSONObject(from: request.body)
             let wantsStream = (requestObject["stream"] as? Bool) ?? false
-            let prompt = try promptText(from: requestObject)
             let requestedModel = trimmedString(requestObject["model"]) ?? state.defaultModel
-            let configDirectoryURL = paths.copilotManagedConfigDirectoryURL(named: state.credential.configDirectoryName)
-            let result = try await CopilotACPClient(configDirectoryURL: configDirectoryURL).prompt(
-                workingDirectoryURL: state.workingDirectoryURL,
-                model: requestedModel,
-                prompt: prompt
+            let upstreamRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
+                from: request.body,
+                fallbackModel: requestedModel
             )
-            let responseObject = responseObject(from: result)
+            let (statusCode, data) = try await provider.sendChatCompletions(
+                using: state.credential,
+                body: upstreamRequest
+            )
+            guard (200..<300).contains(statusCode) else {
+                return jsonResponse(
+                    statusCode: statusCode,
+                    body: errorPayload(message: ResponsesChatCompletionsBridge.extractErrorMessage(from: data))
+                )
+            }
+
+            let responseData = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
+                from: data,
+                fallbackModel: requestedModel
+            )
+            guard let responseObject = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+                throw ResponsesChatCompletionsBridge.TranslationError.invalidResponse(L10n.tr("本地桥接响应格式无效。"))
+            }
 
             if wantsStream {
                 return HTTPResponse(
@@ -284,7 +293,7 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
                 )
             }
 
-            return jsonResponse(statusCode: 200, body: jsonData(responseObject))
+            return jsonResponse(statusCode: 200, body: responseData)
         } catch {
             let message = error.localizedDescription
             return jsonResponse(statusCode: statusCode(for: message), body: errorPayload(message: message))
@@ -480,17 +489,25 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
         var seen = Set<String>()
 
         for model in availableModels {
-            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            guard let trimmed = normalizedModelCandidate(model), seen.insert(trimmed).inserted else { continue }
             normalized.append(trimmed)
         }
 
-        let trimmedFallback = fallbackModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedFallback.isEmpty, seen.insert(trimmedFallback).inserted {
+        if let trimmedFallback = normalizedModelCandidate(fallbackModel),
+           seen.insert(trimmedFallback).inserted
+        {
             normalized.append(trimmedFallback)
         }
 
         return normalized
+    }
+
+    private func normalizedModelCandidate(_ model: String?) -> String? {
+        let trimmedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedModel.isEmpty, trimmedModel != "gpt-5.3-codex" else {
+            return nil
+        }
+        return trimmedModel
     }
 
     private func trimmedString(_ value: Any?) -> String? {
