@@ -548,6 +548,13 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func moveAccount(_ accountID: UUID, to destinationAccountID: UUID) {
+        database.moveAccount(id: accountID, to: destinationAccountID)
+        Task {
+            try? await persistDatabase()
+        }
+    }
+
     func shouldOfferRestartCodex(for account: ManagedAccount) -> Bool {
         restartRecommendedAccountID == account.id && hasRunningMainCodexDesktop
     }

@@ -403,7 +403,6 @@ struct AppDatabase: Codable, Sendable {
         } else {
             accounts.append(account)
         }
-        accounts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         normalizeCLIEnvironmentState()
     }
 
@@ -490,6 +489,22 @@ struct AppDatabase: Codable, Sendable {
         } else {
             cliLaunchHistoryByAccountID[key] = history
         }
+    }
+
+    mutating func moveAccount(id accountID: UUID, to destinationAccountID: UUID) {
+        guard
+            let sourceIndex = accounts.firstIndex(where: { $0.id == accountID }),
+            let destinationIndex = accounts.firstIndex(where: { $0.id == destinationAccountID }),
+            sourceIndex != destinationIndex
+        else {
+            return
+        }
+
+        let destinationOffset = sourceIndex < destinationIndex ? destinationIndex + 1 : destinationIndex
+        let account = accounts.remove(at: sourceIndex)
+        let adjustedDestination = sourceIndex < destinationOffset ? destinationOffset - 1 : destinationOffset
+        let insertionIndex = min(max(adjustedDestination, 0), accounts.count)
+        accounts.insert(account, at: insertionIndex)
     }
 
     mutating func normalizeCLIEnvironmentState() {

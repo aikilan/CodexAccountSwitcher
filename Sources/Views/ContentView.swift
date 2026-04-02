@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum SidebarLayoutMetrics {
     static let minWidth: CGFloat = 272
@@ -14,6 +15,8 @@ private enum SidebarLayoutMetrics {
 struct ContentView: View {
     @ObservedObject var model: AppViewModel
     @Environment(\.openWindow) private var openWindow
+    @State private var draggedAccountID: UUID?
+    @State private var dropTargetAccountID: UUID?
 
     var body: some View {
         HSplitView {
@@ -146,12 +149,29 @@ struct ContentView: View {
                             snapshot: model.snapshot(for: account.id),
                             claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
                             copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
-                            isSelected: resolvedSelectedAccountID == account.id
+                            isSelected: resolvedSelectedAccountID == account.id,
+                            isDropTarget: dropTargetAccountID == account.id,
+                            showsReorderHandle: model.accounts.count > 1
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .onDrag {
+                        draggedAccountID = account.id
+                        return NSItemProvider(object: account.id.uuidString as NSString)
+                    }
+                    .onDrop(
+                        of: [UTType.plainText],
+                        delegate: AccountListReorderDropDelegate(
+                            destinationAccountID: account.id,
+                            draggedAccountID: $draggedAccountID,
+                            dropTargetAccountID: $dropTargetAccountID,
+                            onMove: { sourceAccountID, destinationAccountID in
+                                model.moveAccount(sourceAccountID, to: destinationAccountID)
+                            }
+                        )
+                    )
                     .contextMenu {
                         Button(account.isActive ? L10n.tr("当前正在使用") : L10n.tr("切换到此账号")) {
                             Task { @MainActor in await model.switchToAccount(account) }
@@ -403,6 +423,8 @@ private struct AccountListRow: View {
     let claudeSnapshot: ClaudeRateLimitSnapshot?
     let copilotSnapshot: CopilotQuotaSnapshot?
     let isSelected: Bool
+    let isDropTarget: Bool
+    let showsReorderHandle: Bool
 
     @State private var isHovering = false
     @State private var isHoveringFailureIcon = false
@@ -425,6 +447,12 @@ private struct AccountListRow: View {
                         .background(OrbitPalette.successSoft, in: Capsule())
                 }
                 AccountPlatformBadge(title: account.accountListBadgeTitle)
+
+                Image(systemName: "line.3.horizontal")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .opacity(showsReorderHandle ? (isHovering || isDropTarget ? 0.82 : 0.24) : 0)
+                    .frame(width: 12)
             }
 
             Text(accountSubtitle)
@@ -530,6 +558,9 @@ private struct AccountListRow: View {
     }
 
     private var backgroundColor: Color {
+        if isDropTarget {
+            return OrbitPalette.panel
+        }
         if isSelected {
             return OrbitPalette.panel
         }
@@ -543,6 +574,9 @@ private struct AccountListRow: View {
     }
 
     private var borderColor: Color {
+        if isDropTarget {
+            return OrbitPalette.accent.opacity(0.34)
+        }
         if isSelected {
             return OrbitPalette.accent.opacity(0.22)
         }
@@ -555,6 +589,50 @@ private struct AccountListRow: View {
     private func claudeRemainingText(_ value: Int?) -> String {
         guard let value else { return L10n.tr("未知") }
         return "\(value)"
+    }
+}
+
+private struct AccountListReorderDropDelegate: DropDelegate {
+    let destinationAccountID: UUID
+    @Binding var draggedAccountID: UUID?
+    @Binding var dropTargetAccountID: UUID?
+    let onMove: (UUID, UUID) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedAccountID != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedAccountID, draggedAccountID != destinationAccountID else { return }
+        dropTargetAccountID = destinationAccountID
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard let draggedAccountID, draggedAccountID != destinationAccountID else {
+            return DropProposal(operation: .cancel)
+        }
+        dropTargetAccountID = destinationAccountID
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        if dropTargetAccountID == destinationAccountID {
+            dropTargetAccountID = nil
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            draggedAccountID = nil
+            dropTargetAccountID = nil
+        }
+
+        guard let draggedAccountID, draggedAccountID != destinationAccountID else {
+            return false
+        }
+
+        onMove(draggedAccountID, destinationAccountID)
+        return true
     }
 }
 
@@ -1087,7 +1165,9 @@ private struct AccountDetailView: View {
     }
 
     private var shouldShowIsolatedInstanceAction: Bool {
-        account.providerRule == .chatgptOAuth || account.providerRule == .openAICompatible
+        account.providerRule == .chatgptOAuth
+            || account.providerRule == .openAICompatible
+            || account.providerRule == .githubCopilot
     }
 
     private var isIsolatedInstanceActionDisabled: Bool {
@@ -1136,7 +1216,7 @@ private struct AccountDetailView: View {
 
             if account.providerRule == .githubCopilot {
                 if let copilotSnapshot {
-                    HStack(spacing: 10) {
+                    HStack(alignment: .top, spacing: 10) {
                         if let chat = copilotSnapshot.chat {
                             quotaStat(title: L10n.tr("Chat 剩余"), value: chat.remainingPercentageText)
                         }
@@ -1175,7 +1255,7 @@ private struct AccountDetailView: View {
             } else if account.platform == .codex {
                 if let snapshot {
                     if snapshot.fiveHourWindow != nil || snapshot.weeklyWindow != nil {
-                        HStack(spacing: 10) {
+                        HStack(alignment: .top, spacing: 10) {
                             if let fiveHourWindow = snapshot.fiveHourWindow {
                                 quotaStat(title: L10n.tr("5 小时剩余"), value: fiveHourWindow.remainingPercentText)
                             }
@@ -1248,20 +1328,43 @@ private struct AccountDetailView: View {
     }
 
     private func quotaStat(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(quotaStatDisplayTitle(title))
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
             Text(value)
                 .font(.title3.weight(.bold))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
         .padding(14)
         .background(OrbitPalette.panelMuted, in: RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous)
                 .strokeBorder(OrbitPalette.divider, lineWidth: 1)
         )
+    }
+
+    private func quotaStatDisplayTitle(_ title: String) -> String {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedTitle.hasSuffix("剩余") {
+            let prefix = trimmedTitle.dropLast("剩余".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !prefix.isEmpty {
+                return "\(prefix)\n剩余"
+            }
+        }
+
+        if trimmedTitle.lowercased().hasSuffix("remaining") {
+            let prefix = trimmedTitle.dropLast("remaining".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !prefix.isEmpty {
+                return "\(prefix)\nremaining"
+            }
+        }
+
+        return trimmedTitle
     }
 
     private var pathSection: some View {

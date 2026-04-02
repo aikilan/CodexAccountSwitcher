@@ -549,4 +549,48 @@ final class PlatformFoundationTests: XCTestCase {
         XCTAssertTrue(fileManager.fileExists(atPath: codexLegacyDatabase.path))
         XCTAssertFalse(fileManager.fileExists(atPath: llmLegacySupport.path))
     }
+
+    func testAppDatabaseManualOrderSurvivesAccountUpdate() {
+        let firstAccount = makeManagedAccount(identifier: "acct_zulu", displayName: "Zulu")
+        let secondAccount = makeManagedAccount(identifier: "acct_alpha", displayName: "Alpha")
+        var database = AppDatabase(
+            version: AppDatabase.currentVersion,
+            accounts: [firstAccount, secondAccount],
+            quotaSnapshots: [:],
+            claudeRateLimitSnapshots: [:],
+            copilotQuotaSnapshots: [:],
+            switchLogs: [],
+            cliLaunchHistoryByAccountID: [:],
+            activeAccountID: nil
+        )
+
+        database.moveAccount(id: secondAccount.id, to: firstAccount.id)
+
+        var updatedSecondAccount = secondAccount
+        updatedSecondAccount.displayName = "Alpha Renamed"
+        database.upsert(account: updatedSecondAccount)
+
+        XCTAssertEqual(database.accounts.map(\.id), [secondAccount.id, firstAccount.id])
+        XCTAssertEqual(database.accounts.first?.displayName, "Alpha Renamed")
+    }
+
+    private func makeManagedAccount(identifier: String, displayName: String) -> ManagedAccount {
+        ManagedAccount(
+            id: UUID(),
+            platform: .codex,
+            accountIdentifier: identifier,
+            displayName: displayName,
+            email: "\(identifier)@example.com",
+            authKind: .chatgpt,
+            createdAt: Date(timeIntervalSince1970: 0),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+    }
 }
