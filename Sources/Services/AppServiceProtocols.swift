@@ -134,6 +134,11 @@ struct PreparedCopilotResponsesBridge: Equatable, Sendable {
     let apiKey: String
 }
 
+struct ResolvedCodexDesktopModelSelection: Equatable, Sendable {
+    let selectedModel: String
+    let availableModels: [String]
+}
+
 protocol CopilotResponsesBridgeManaging: Sendable {
     func prepareBridge(
         accountID: UUID,
@@ -187,10 +192,17 @@ protocol UserNotifying: Sendable {
 protocol CodexRuntimeInspecting: Sendable {
     func hasRunningMainApplication() async -> Bool
     func verifySwitch(after date: Date, timeoutSeconds: TimeInterval) async -> SwitchVerificationResult
-    func restartCodex() async throws
+    func restartCodex(launchEnvironment: [String: String]) async throws
 }
 
 protocol CLIEnvironmentResolving: Sendable {
+    func resolveCodexDesktopModelSelection(
+        for account: ManagedAccount,
+        providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential?,
+        copilotStatus: CopilotAccountStatus?
+    ) async throws -> ResolvedCodexDesktopModelSelection
+
     func resolveCodexContext(
         for account: ManagedAccount,
         workingDirectoryURL: URL,

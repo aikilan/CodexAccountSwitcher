@@ -758,6 +758,160 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         }
     }
 
+    func testResolveCodexDesktopModelSelectionPrefetchesPresetProviderModels() async throws {
+        ResolverMockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[{"id":"gpt-4.1"},{"id":"gpt-4o"}]}"#.utf8))
+        }
+
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let account = makeProviderAccount(
+            platform: .codex,
+            rule: .openAICompatible,
+            presetID: "openai",
+            baseURL: "https://api.openai.com/v1",
+            envName: "OPENAI_API_KEY",
+            model: "gpt-5.4"
+        )
+
+        let selection = try await resolver.resolveCodexDesktopModelSelection(
+            for: account,
+            providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-openai-test").validated(),
+            copilotCredential: nil,
+            copilotStatus: nil
+        )
+
+        XCTAssertEqual(selection.selectedModel, "gpt-5.4")
+        XCTAssertEqual(selection.availableModels, ["gpt-4.1", "gpt-4o", "gpt-5.4"])
+    }
+
+    func testResolveCodexDesktopModelSelectionFallsBackToDefaultModelForCustomProvider() async throws {
+        ResolverMockURLProtocol.requestHandler = { _ in
+            XCTFail("custom provider 不应该触发模型预查询")
+            let response = HTTPURLResponse(
+                url: URL(string: "https://example.com")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(#"{"data":[]}"#.utf8))
+        }
+
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let account = makeProviderAccount(
+            platform: .codex,
+            rule: .openAICompatible,
+            presetID: ProviderCatalog.customPresetID,
+            baseURL: "https://example.com/v1",
+            envName: "CUSTOM_API_KEY",
+            model: "deepseek-chat"
+        )
+
+        let selection = try await resolver.resolveCodexDesktopModelSelection(
+            for: account,
+            providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-custom-openai").validated(),
+            copilotCredential: nil,
+            copilotStatus: nil
+        )
+
+        XCTAssertEqual(selection.selectedModel, "deepseek-chat")
+        XCTAssertEqual(selection.availableModels, ["deepseek-chat"])
+    }
+
+    func testResolveCodexDesktopModelSelectionUsesCopilotLiveStatus() async throws {
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let account = ManagedAccount(
+            id: UUID(),
+            platform: .codex,
+            accountIdentifier: UUID().uuidString,
+            displayName: "GitHub Copilot",
+            email: "user@example.com",
+            authKind: .githubCopilot,
+            providerRule: .githubCopilot,
+            providerPresetID: nil,
+            providerDisplayName: "GitHub Copilot",
+            providerBaseURL: nil,
+            providerAPIKeyEnvName: nil,
+            defaultModel: "gpt-4.1",
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+        let credential = try CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            defaultModel: "gpt-4o"
+        ).validated()
+        let status = CopilotAccountStatus(
+            availableModels: ["gpt-4.1", "claude-opus-4.1"],
+            currentModel: "claude-opus-4.1",
+            quotaSnapshot: nil
+        )
+
+        let selection = try await resolver.resolveCodexDesktopModelSelection(
+            for: account,
+            providerAPIKeyCredential: nil,
+            copilotCredential: credential,
+            copilotStatus: status
+        )
+
+        XCTAssertEqual(selection.selectedModel, "gpt-4.1")
+        XCTAssertEqual(selection.availableModels, ["gpt-4.1", "claude-opus-4.1"])
+    }
+
+    func testResolveCodexDesktopContextWritesConfiguredReasoningEffort() async throws {
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let paths = try makePaths()
+        let account = ManagedAccount(
+            id: UUID(),
+            platform: .codex,
+            accountIdentifier: UUID().uuidString,
+            displayName: "OpenAI",
+            email: "sk-***",
+            authKind: .providerAPIKey,
+            providerRule: .openAICompatible,
+            providerPresetID: "openai",
+            providerDisplayName: "OpenAI",
+            providerBaseURL: "https://api.openai.com/v1",
+            providerAPIKeyEnvName: "OPENAI_API_KEY",
+            defaultModel: "gpt-5.4",
+            defaultModelReasoningEffort: "high",
+            createdAt: Date(),
+            lastUsedAt: nil,
+            lastQuotaSnapshotAt: nil,
+            lastRefreshAt: nil,
+            planType: nil,
+            lastStatusCheckAt: nil,
+            lastStatusMessage: nil,
+            lastStatusLevel: nil,
+            isActive: false
+        )
+
+        let context = try await resolver.resolveCodexDesktopContext(
+            for: account,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-openai-test").validated(),
+            copilotCredential: nil,
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
+            openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
+            claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
+        )
+
+        XCTAssertTrue(context.configFileContents?.contains("model_reasoning_effort = \"high\"") == true)
+    }
+
     private func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ResolverMockURLProtocol.self]
@@ -780,7 +934,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         presetID: String,
         baseURL: String,
         envName: String,
-        model: String
+        model: String,
+        reasoningEffort: String? = nil
     ) -> ManagedAccount {
         ManagedAccount(
             id: UUID(),
@@ -795,6 +950,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             providerBaseURL: baseURL,
             providerAPIKeyEnvName: envName,
             defaultModel: model,
+            defaultModelReasoningEffort: reasoningEffort,
             createdAt: Date(),
             lastUsedAt: nil,
             lastQuotaSnapshotAt: nil,

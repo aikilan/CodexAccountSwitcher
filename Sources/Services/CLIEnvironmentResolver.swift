@@ -54,6 +54,53 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         self.session = session
     }
 
+    func resolveCodexDesktopModelSelection(
+        for account: ManagedAccount,
+        providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential? = nil,
+        copilotStatus: CopilotAccountStatus? = nil
+    ) async throws -> ResolvedCodexDesktopModelSelection {
+        switch account.providerRule {
+        case .openAICompatible:
+            guard let credential = providerAPIKeyCredential else {
+                throw CLIEnvironmentResolverError.missingProviderCredential
+            }
+            let selectedModel = account.resolvedDefaultModel
+            let availableModels: [String]
+
+            if shouldPrefetchModels(for: account) {
+                let providerConfig = try resolvedProviderConfig(for: account)
+                availableModels = await availableModelsForBridge(
+                    account: account,
+                    providerBaseURL: providerConfig.baseURL,
+                    apiKey: credential.apiKey
+                )
+            } else {
+                availableModels = fallbackAvailableModels(defaultModel: selectedModel)
+            }
+
+            return ResolvedCodexDesktopModelSelection(
+                selectedModel: selectedModel,
+                availableModels: availableModels.isEmpty ? [selectedModel] : availableModels
+            )
+        case .githubCopilot:
+            guard let copilotCredential else {
+                throw CLIEnvironmentResolverError.missingCopilotCredential
+            }
+            let launchConfiguration = copilotLaunchConfiguration(
+                for: account,
+                credential: copilotCredential,
+                status: copilotStatus
+            )
+            return ResolvedCodexDesktopModelSelection(
+                selectedModel: launchConfiguration.model,
+                availableModels: launchConfiguration.availableModels
+            )
+        case .chatgptOAuth, .claudeCompatible, .claudeProfile:
+            throw CLIEnvironmentResolverError.codexCLINotSupported
+        }
+    }
+
     func resolveCodexContext(
         for account: ManagedAccount,
         workingDirectoryURL: URL,
@@ -528,6 +575,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 : nil,
             configFileContents: codexConfigContents(
                 model: account.resolvedDefaultModel,
+                reasoningEffort: account.resolvedDefaultModelReasoningEffort,
                 modelProvider: provider.identifier,
                 providerIdentifier: provider.identifier,
                 providerDisplayName: provider.displayName,
@@ -562,6 +610,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: availableModels),
             configFileContents: codexConfigContents(
                 model: account.resolvedDefaultModel,
+                reasoningEffort: account.resolvedDefaultModelReasoningEffort,
                 modelProvider: provider.identifier,
                 providerIdentifier: provider.identifier,
                 providerDisplayName: provider.displayName,
@@ -596,6 +645,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: launchConfiguration.availableModels),
             configFileContents: codexConfigContents(
                 model: launchConfiguration.model,
+                reasoningEffort: account.resolvedDefaultModelReasoningEffort,
                 modelProvider: "github-copilot",
                 providerIdentifier: "github-copilot",
                 providerDisplayName: "GitHub Copilot",
@@ -898,6 +948,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
 
     private func codexConfigContents(
         model: String,
+        reasoningEffort: String,
         modelProvider: String,
         providerIdentifier: String,
         providerDisplayName: String,
@@ -907,6 +958,9 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         var lines = [String]()
         if !model.isEmpty {
             lines.append("model = \"\(tomlEscaped(model))\"")
+        }
+        if !reasoningEffort.isEmpty {
+            lines.append("model_reasoning_effort = \"\(tomlEscaped(reasoningEffort))\"")
         }
         if !modelProvider.isEmpty {
             lines.append("model_provider = \"\(tomlEscaped(modelProvider))\"")

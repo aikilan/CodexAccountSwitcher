@@ -15,6 +15,7 @@ private enum SidebarLayoutMetrics {
 struct ContentView: View {
     @ObservedObject var model: AppViewModel
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(AppAppearancePreference.storageKey) private var appearancePreference = AppAppearancePreference.system.rawValue
     @State private var draggedAccountID: UUID?
     @State private var dropTargetAccountID: UUID?
     @State private var hoveredAccountID: UUID?
@@ -36,6 +37,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(OrbitPalette.background)
         .tint(OrbitPalette.accent)
+        .preferredColorScheme(resolvedAppearancePreference.colorScheme)
         .task {
             model.sessionLogger?.info("content_task.begin")
             WindowRouter.shared.register { id in
@@ -53,6 +55,11 @@ struct ContentView: View {
             Task {
                 await model.reconcileCurrentAuthStateForAppActivation()
             }
+        }
+        .sheet(item: $model.isolatedCodexModelSelection, onDismiss: {
+            model.cancelIsolatedCodexModelSelection()
+        }) { _ in
+            IsolatedCodexModelSelectionSheet(model: model)
         }
         .confirmationDialog(
             L10n.tr("删除账号"),
@@ -301,6 +308,26 @@ struct ContentView: View {
             }
             .padding(.top, 4)
 
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L10n.tr("外观"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker(
+                    L10n.tr("外观"),
+                    selection: Binding(
+                        get: { resolvedAppearancePreference },
+                        set: { appearancePreference = $0.rawValue }
+                    )
+                ) {
+                    ForEach(AppAppearancePreference.allCases) { preference in
+                        Text(preference.title).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
             if !model.focusedPlatformUnsupportedMessage.isEmpty {
                 Text(model.focusedPlatformUnsupportedMessage)
                     .font(.caption)
@@ -322,6 +349,10 @@ struct ContentView: View {
 
     private var resolvedSelectedAccountID: UUID? {
         model.selectedAccountID ?? model.activeAccount?.id
+    }
+
+    private var resolvedAppearancePreference: AppAppearancePreference {
+        AppAppearancePreference.resolved(from: appearancePreference)
     }
 
     private func presentWindow(id: String) {
@@ -442,7 +473,7 @@ private struct AccountPlatformBadge: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
-            .background(Color.primary.opacity(0.05), in: Capsule())
+            .background(OrbitPalette.chromeFill, in: Capsule())
     }
 }
 
@@ -580,29 +611,29 @@ private struct AccountListRow: View {
 
     private var backgroundColor: Color {
         if isDropTarget {
-            return OrbitPalette.panel
+            return OrbitPalette.accentStrong
         }
         if isSelected {
-            return OrbitPalette.panel
+            return OrbitPalette.selectionFill
         }
         if account.isActive {
             return OrbitPalette.panelMuted
         }
         if isHovering {
-            return OrbitPalette.panel
+            return OrbitPalette.floatingPanel
         }
         return Color.clear
     }
 
     private var borderColor: Color {
         if isDropTarget {
-            return OrbitPalette.accent.opacity(0.34)
+            return OrbitPalette.accent.opacity(0.4)
         }
         if isSelected {
-            return OrbitPalette.accent.opacity(0.22)
+            return OrbitPalette.accent.opacity(0.3)
         }
         if isHovering {
-            return Color.black.opacity(0.08)
+            return OrbitPalette.hoverBorder
         }
         return Color.clear
     }
@@ -673,6 +704,7 @@ private struct AccountFailurePopoverContent: View {
 
 private struct AccountDetailView: View {
     @ObservedObject var model: AppViewModel
+    @Environment(\.colorScheme) private var colorScheme
     let account: ManagedAccount
     let snapshot: QuotaSnapshot?
     let claudeSnapshot: ClaudeRateLimitSnapshot?
@@ -751,7 +783,7 @@ private struct AccountDetailView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.05), in: Capsule())
+                    .background(OrbitPalette.chromeFill, in: Capsule())
             }
 
             if let workspaceStatusText {
@@ -902,7 +934,7 @@ private struct AccountDetailView: View {
             }
 
             Rectangle()
-                .fill(Color.white.opacity(0.5))
+                .fill(OrbitPalette.divider)
                 .frame(height: 1)
 
             Button {
@@ -1085,15 +1117,41 @@ private struct AccountDetailView: View {
             Text(L10n.tr("删除账号"))
                 .font(.headline.bold())
 
-            Button(L10n.tr("删除账号"), role: .destructive) {
+            Text(L10n.tr("此操作不可撤销。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button(role: .destructive) {
                 onDelete()
+            } label: {
+                Text(L10n.tr("删除账号"))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(deleteButtonForegroundColor)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous)
+                            .strokeBorder(deleteButtonBorderColor, lineWidth: 1)
+                    )
             }
-            .buttonStyle(.bordered)
-            .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+            .buttonStyle(.plain)
+            .disabled(isDeleteActionDisabled)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .orbitSurface(.danger)
+    }
+
+    private var isDeleteActionDisabled: Bool {
+        model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress
+    }
+
+    private var deleteButtonForegroundColor: Color {
+        Color.red.opacity(isDeleteActionDisabled ? 0.42 : 0.9)
+    }
+
+    private var deleteButtonBorderColor: Color {
+        Color.red.opacity(isDeleteActionDisabled ? 0.16 : 0.34)
     }
 
     private var switchButtonTitle: String {
@@ -1265,13 +1323,10 @@ private struct AccountDetailView: View {
                         inspectorRow(L10n.tr("采集时间"), copilotSnapshot.capturedAt.formatted(date: .abbreviated, time: .standard))
                     }
                 } else {
-                    Text(L10n.tr("当前还没有可用的 Copilot quota 快照；手动更新状态至少会校验本地登录态和模型列表。"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .orbitSurface(.warning)
+                    inspectorNotice(
+                        L10n.tr("当前还没有可用的 Copilot quota 快照；手动更新状态至少会校验本地登录态和模型列表。"),
+                        tone: .warning
+                    )
                 }
             } else if account.platform == .codex {
                 if let snapshot {
@@ -1309,13 +1364,10 @@ private struct AccountDetailView: View {
                         }
                     }
                 } else {
-                    Text(L10n.tr("这个账号还没有被可靠归档的本地额度快照。切换到该账号并实际使用一段时间后，应用会从本地会话事件中抓取额度。"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .orbitSurface(.warning)
+                    inspectorNotice(
+                        L10n.tr("这个账号还没有被可靠归档的本地额度快照。切换到该账号并实际使用一段时间后，应用会从本地会话事件中抓取额度。"),
+                        tone: .warning
+                    )
                 }
             } else if let claudeSnapshot {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1329,21 +1381,15 @@ private struct AccountDetailView: View {
                     inspectorRow(L10n.tr("采集时间"), claudeSnapshot.capturedAt.formatted(date: .abbreviated, time: .standard))
                 }
             } else if account.authKind == .claudeProfile {
-                Text(L10n.tr("这是本地 Claude Profile；应用不会在线刷新 claude.ai 登录态，可直接从应用启动 Claude CLI 验证。"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .orbitSurface(.warning)
+                inspectorNotice(
+                    L10n.tr("这是本地 Claude Profile；应用不会在线刷新 claude.ai 登录态，可直接从应用启动 Claude CLI 验证。"),
+                    tone: .warning
+                )
             } else {
-                Text(L10n.tr("还没有刷新过 Anthropic 限额。手动更新状态后，应用会读取响应头中的 requests 和 token 限额信息。"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .orbitSurface(.warning)
+                inspectorNotice(
+                    L10n.tr("还没有刷新过 Anthropic 限额。手动更新状态后，应用会读取响应头中的 requests 和 token 限额信息。"),
+                    tone: .warning
+                )
             }
         }
     }
@@ -1555,8 +1601,22 @@ private struct AccountDetailView: View {
 
     private var statusSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(L10n.tr("账号状态"))
-                .font(.headline)
+            if usesSubduedInspectorCards {
+                HStack(alignment: .center, spacing: 10) {
+                    Text(L10n.tr("账号状态"))
+                        .font(.headline)
+
+                    Spacer(minLength: 8)
+
+                    semanticBadge(
+                        title: statusBadgeTitle,
+                        tone: statusTone
+                    )
+                }
+            } else {
+                Text(L10n.tr("账号状态"))
+                    .font(.headline)
+            }
 
             VStack(alignment: .leading, spacing: 10) {
                 inspectorRow(L10n.tr("上次检查"), account.lastStatusCheckAt?.formatted(date: .abbreviated, time: .standard) ?? L10n.tr("尚未手动更新"))
@@ -1566,6 +1626,113 @@ private struct AccountDetailView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .orbitSurface(statusTone)
+        }
+    }
+
+    private var statusBadgeTitle: String {
+        switch statusTone {
+        case .success:
+            return L10n.tr("可用")
+        case .warning:
+            return L10n.tr("注意")
+        case .danger:
+            return L10n.tr("异常")
+        case .neutral, .accent:
+            return ""
+        }
+    }
+
+    @ViewBuilder
+    private func inspectorNotice(_ message: String, tone: OrbitSurfaceTone) -> some View {
+        if usesSubduedInspectorCards {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: semanticSymbolName(for: tone))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(semanticForegroundColor(for: tone))
+                    .frame(width: 16)
+                    .padding(.top, 2)
+
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .orbitSurface(tone)
+        } else {
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .orbitSurface(tone)
+        }
+    }
+
+    private var usesSubduedInspectorCards: Bool {
+        colorScheme == .dark
+    }
+
+    private func semanticBadge(title: String, tone: OrbitSurfaceTone) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            Circle()
+                .fill(semanticForegroundColor(for: tone))
+                .frame(width: 6, height: 6)
+
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(semanticForegroundColor(for: tone))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(semanticBackgroundColor(for: tone), in: Capsule())
+    }
+
+    private func semanticSymbolName(for tone: OrbitSurfaceTone) -> String {
+        switch tone {
+        case .success:
+            return "checkmark.circle.fill"
+        case .warning:
+            return "exclamationmark.triangle.fill"
+        case .danger:
+            return "xmark.circle.fill"
+        case .neutral:
+            return "info.circle.fill"
+        case .accent:
+            return "sparkles"
+        }
+    }
+
+    private func semanticForegroundColor(for tone: OrbitSurfaceTone) -> Color {
+        switch tone {
+        case .success:
+            return .green
+        case .warning:
+            return .yellow
+        case .danger:
+            return .red
+        case .neutral:
+            return .secondary
+        case .accent:
+            return OrbitPalette.accent
+        }
+    }
+
+    private func semanticBackgroundColor(for tone: OrbitSurfaceTone) -> Color {
+        switch tone {
+        case .success:
+            return OrbitPalette.successSoft
+        case .warning:
+            return OrbitPalette.warningSoft
+        case .danger:
+            return OrbitPalette.dangerSoft
+        case .neutral:
+            return OrbitPalette.chromeFill
+        case .accent:
+            return OrbitPalette.accentSoft
         }
     }
 
@@ -1663,13 +1830,13 @@ private struct CLIDirectoryHistoryCard: View {
 
     private var backgroundColor: Color {
         if isDisabled {
-            return Color.white.opacity(0.4)
+            return OrbitPalette.floatingPanelDisabled
         }
-        return isHovering ? Color.white.opacity(0.95) : Color.white.opacity(0.78)
+        return isHovering ? OrbitPalette.floatingPanelHover : OrbitPalette.floatingPanel
     }
 
     private var overlayColor: Color {
-        isHovering ? OrbitPalette.accent.opacity(0.2) : Color.black.opacity(0.05)
+        isHovering ? OrbitPalette.accent.opacity(0.2) : OrbitPalette.hoverBorder
     }
 }
 
@@ -1824,11 +1991,11 @@ private struct MenuBarAccountRow: View {
     }
 
     private var backgroundColor: Color {
-        account.isActive ? Color.primary.opacity(0.07) : Color.primary.opacity(0.025)
+        account.isActive ? OrbitPalette.selectionFill : OrbitPalette.chromeSubtle
     }
 
     private var borderColor: Color {
-        account.isActive ? Color.primary.opacity(0.06) : Color.primary.opacity(0.035)
+        account.isActive ? OrbitPalette.accent.opacity(0.18) : OrbitPalette.divider
     }
 
     private var summaryText: String? {
@@ -1854,6 +2021,7 @@ struct MenuBarContentView: View {
     let onOpenAddAccount: () -> Void
     let onPreferredHeightChange: (CGFloat) -> Void
 
+    @AppStorage(AppAppearancePreference.storageKey) private var appearancePreference = AppAppearancePreference.system.rawValue
     @State private var measuredAccountListHeight: CGFloat = 0
     @State private var measuredPanelHeight: CGFloat = 0
 
@@ -1932,9 +2100,14 @@ struct MenuBarContentView: View {
                 onPreferredHeightChange(height)
             }
         }
+        .preferredColorScheme(resolvedAppearancePreference.colorScheme)
         .task {
             await model.prepare()
         }
+    }
+
+    private var resolvedAppearancePreference: AppAppearancePreference {
+        AppAppearancePreference.resolved(from: appearancePreference)
     }
 
     private var accountListHeight: CGFloat {

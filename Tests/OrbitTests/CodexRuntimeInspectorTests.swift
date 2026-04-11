@@ -93,7 +93,7 @@ final class CodexRuntimeInspectorTests: XCTestCase {
             },
             resolveApplicationURL: { nil },
             isIsolatedApplication: { $0 == 200 },
-            openApplication: { _ in }
+            openApplication: { _, _ in }
         )
 
         let result = await inspector.verifySwitch(after: Date(), timeoutSeconds: 0.1)
@@ -115,7 +115,7 @@ final class CodexRuntimeInspectorTests: XCTestCase {
             },
             resolveApplicationURL: { nil },
             isIsolatedApplication: { $0 == 202 },
-            openApplication: { _ in }
+            openApplication: { _, _ in }
         )
 
         let hasRunningMainApplication = await inspector.hasRunningMainApplication()
@@ -143,12 +143,12 @@ final class CodexRuntimeInspectorTests: XCTestCase {
             runningApplications: { state.applications },
             resolveApplicationURL: { appURL },
             isIsolatedApplication: { $0 == 202 },
-            openApplication: { url in
+            openApplication: { url, _ in
                 state.openedApplicationURLs.append(url)
             }
         )
 
-        try await inspector.restartCodex()
+        try await inspector.restartCodex(launchEnvironment: [:])
 
         XCTAssertEqual(state.terminatedProcessIdentifiers, [101])
         XCTAssertEqual(state.openedApplicationURLs, [appURL])
@@ -170,15 +170,41 @@ final class CodexRuntimeInspectorTests: XCTestCase {
             runningApplications: { state.applications },
             resolveApplicationURL: { appURL },
             isIsolatedApplication: { _ in true },
-            openApplication: { url in
+            openApplication: { url, _ in
                 state.openedApplicationURLs.append(url)
             }
         )
 
-        try await inspector.restartCodex()
+        try await inspector.restartCodex(launchEnvironment: [:])
 
         XCTAssertTrue(state.terminatedProcessIdentifiers.isEmpty)
         XCTAssertEqual(state.openedApplicationURLs, [appURL])
+    }
+
+    func testRestartCodexPassesLaunchEnvironmentToRelaunch() async throws {
+        let databaseURL = try makeLogDatabase(entries: [])
+        let appURL = URL(fileURLWithPath: "/Applications/Codex.app")
+        let state = RunningApplicationState()
+        let expectedEnvironment = [
+            "GITHUB_TOKEN": "copilot-token",
+            "OPENAI_BASE_URL": "http://127.0.0.1:18081",
+        ]
+        let capture = LaunchEnvironmentCapture()
+
+        let inspector = CodexRuntimeInspector(
+            logReader: SQLiteLogReader(databaseURL: databaseURL),
+            runningApplications: { state.applications },
+            resolveApplicationURL: { appURL },
+            isIsolatedApplication: { _ in false },
+            openApplication: { _, launchEnvironment in
+                await capture.set(launchEnvironment)
+            }
+        )
+
+        try await inspector.restartCodex(launchEnvironment: expectedEnvironment)
+
+        let capturedEnvironment = await capture.get()
+        XCTAssertEqual(capturedEnvironment, expectedEnvironment)
     }
 
     func testOpenMainApplicationCompletionHandlerResumesFromBackgroundQueue() async throws {
@@ -280,4 +306,16 @@ private final class RunningApplicationState: @unchecked Sendable {
     var applications: [RunningCodexApplication] = []
     var terminatedProcessIdentifiers: [pid_t] = []
     var openedApplicationURLs: [URL] = []
+}
+
+private actor LaunchEnvironmentCapture {
+    private var value: [String: String]?
+
+    func set(_ value: [String: String]) {
+        self.value = value
+    }
+
+    func get() -> [String: String]? {
+        value
+    }
 }

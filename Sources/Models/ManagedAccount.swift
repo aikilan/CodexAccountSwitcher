@@ -64,6 +64,7 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
     var providerBaseURL: String?
     var providerAPIKeyEnvName: String?
     var defaultModel: String?
+    var defaultModelReasoningEffort: String?
     var defaultCLITarget: CLIEnvironmentTarget
     var createdAt: Date
     var lastUsedAt: Date?
@@ -89,6 +90,7 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
         providerBaseURL: String? = nil,
         providerAPIKeyEnvName: String? = nil,
         defaultModel: String? = nil,
+        defaultModelReasoningEffort: String? = nil,
         defaultCLITarget: CLIEnvironmentTarget? = nil,
         createdAt: Date,
         lastUsedAt: Date?,
@@ -113,6 +115,7 @@ struct ManagedAccount: Identifiable, Codable, Hashable, Sendable {
         self.providerBaseURL = providerBaseURL
         self.providerAPIKeyEnvName = providerAPIKeyEnvName
         self.defaultModel = defaultModel
+        self.defaultModelReasoningEffort = defaultModelReasoningEffort
         self.defaultCLITarget = defaultCLITarget ?? (providerRule ?? Self.legacyProviderRule(for: authKind)).defaultTarget
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
@@ -172,6 +175,11 @@ extension ManagedAccount {
         return ProviderCatalog.preset(id: providerPresetID)?.defaultModel ?? ""
     }
 
+    var resolvedDefaultModelReasoningEffort: String {
+        let trimmed = defaultModelReasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "medium" : trimmed
+    }
+
     var allowedCLITargets: [CLIEnvironmentTarget] {
         switch providerRule {
         case .chatgptOAuth, .openAICompatible, .claudeCompatible, .githubCopilot:
@@ -212,6 +220,7 @@ extension ManagedAccount {
         case providerBaseURL
         case providerAPIKeyEnvName
         case defaultModel
+        case defaultModelReasoningEffort
         case defaultCLITarget
         case createdAt
         case lastUsedAt
@@ -244,6 +253,7 @@ extension ManagedAccount {
         self.providerBaseURL = try container.decodeIfPresent(String.self, forKey: .providerBaseURL)
         self.providerAPIKeyEnvName = try container.decodeIfPresent(String.self, forKey: .providerAPIKeyEnvName)
         self.defaultModel = try container.decodeIfPresent(String.self, forKey: .defaultModel)
+        self.defaultModelReasoningEffort = try container.decodeIfPresent(String.self, forKey: .defaultModelReasoningEffort)
         self.defaultCLITarget = try container.decodeIfPresent(CLIEnvironmentTarget.self, forKey: .defaultCLITarget)
             ?? providerRule.defaultTarget
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
@@ -272,6 +282,7 @@ extension ManagedAccount {
         try container.encodeIfPresent(providerBaseURL, forKey: .providerBaseURL)
         try container.encodeIfPresent(providerAPIKeyEnvName, forKey: .providerAPIKeyEnvName)
         try container.encodeIfPresent(defaultModel, forKey: .defaultModel)
+        try container.encodeIfPresent(defaultModelReasoningEffort, forKey: .defaultModelReasoningEffort)
         try container.encode(defaultCLITarget, forKey: .defaultCLITarget)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)

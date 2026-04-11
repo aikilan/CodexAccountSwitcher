@@ -91,8 +91,21 @@ private enum AccountStatusRefreshOutcome {
     case failure
 }
 
+struct IsolatedCodexModelSelectionState: Identifiable, Equatable {
+    let accountID: UUID
+    let accountDisplayName: String
+    let availableModels: [String]
+    let availableReasoningEfforts: [String]
+    var selectedModel: String
+    var selectedReasoningEffort: String
+
+    var id: UUID { accountID }
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
+    private static let supportedCodexReasoningEfforts = ["low", "medium", "high", "xhigh"]
+
     @Published private(set) var database: AppDatabase = .empty
     @Published var selectedAccountID: UUID?
     @Published private(set) var languagePreference = L10n.currentLanguagePreference
@@ -134,6 +147,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var launchingIsolatedInstanceAccountID: UUID?
     @Published private(set) var launchedIsolatedInstanceAccountIDs: Set<UUID> = []
     @Published private(set) var launchingCLIAccountID: UUID?
+    @Published var isolatedCodexModelSelection: IsolatedCodexModelSelectionState?
+    @Published var isolatedCodexModelSelectionError: String?
 
     let paths: AppPaths
     let sessionLogger: AppSessionLogger?
@@ -684,11 +699,15 @@ final class AppViewModel: ObservableObject {
                 sessionLogger?.info("import_current_auth.end", metadata: ["result": "no_auth_file"])
                 return
             }
-            let hasClaudeActiveAccount = database.account(id: database.activeAccountID)?.platform == .claude
+            let shouldPreserveActiveAccount = shouldPreserveActiveAccountDuringCurrentAuthSync()
             let identity = try resolveIdentity(from: payload)
-            let account = try syncCurrentCodexAccount(identity: identity, payload: payload, makeActive: !hasClaudeActiveAccount)
+            let account = try syncCurrentCodexAccount(
+                identity: identity,
+                payload: payload,
+                makeActive: !shouldPreserveActiveAccount
+            )
 
-            if hasClaudeActiveAccount {
+            if shouldPreserveActiveAccount {
                 database.appendLog(
                     level: .info,
                     message: L10n.tr("检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。", account.displayName)
@@ -708,13 +727,13 @@ final class AppViewModel: ObservableObject {
 
     func reconcileCurrentAuthState() async {
         guard hasLoaded, !isReconcilingCurrentAuth else { return }
-        let hasClaudeActiveAccount = database.account(id: database.activeAccountID)?.platform == .claude
+        let shouldPreserveActiveAccount = shouldPreserveActiveAccountDuringCurrentAuthSync()
         isReconcilingCurrentAuth = true
         defer { isReconcilingCurrentAuth = false }
 
         do {
             guard let payload = try authFileManager.readCurrentAuth() else {
-                if hasClaudeActiveAccount {
+                if shouldPreserveActiveAccount {
                     return
                 }
                 guard let previousActiveID = database.activeAccountID else { return }
@@ -732,9 +751,13 @@ final class AppViewModel: ObservableObject {
             let existingAccountID = database.accounts.first(where: {
                 $0.platform == .codex && $0.accountIdentifier == identity.accountID
             })?.id
-            let account = try syncCurrentCodexAccount(identity: identity, payload: payload, makeActive: !hasClaudeActiveAccount)
+            let account = try syncCurrentCodexAccount(
+                identity: identity,
+                payload: payload,
+                makeActive: !shouldPreserveActiveAccount
+            )
 
-            if hasClaudeActiveAccount {
+            if shouldPreserveActiveAccount {
                 database.appendLog(
                     level: .info,
                     message: L10n.tr("检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。", account.displayName)
@@ -828,12 +851,190 @@ final class AppViewModel: ObservableObject {
         case .chatgptOAuth:
             await launchChatGPTIsolatedCodex(for: account)
         case .openAICompatible:
-            await launchProviderIsolatedCodex(for: account)
+            await prepareIsolatedCodexModelSelection(for: account)
         case .githubCopilot:
-            await launchCopilotIsolatedCodex(for: account)
+            await prepareIsolatedCodexModelSelection(for: account)
         case .claudeCompatible, .claudeProfile:
             pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
         }
+    }
+
+    func updateIsolatedCodexModelSelection(_ model: String) {
+        guard var selection = isolatedCodexModelSelection else { return }
+        selection.selectedModel = model
+        isolatedCodexModelSelection = selection
+    }
+
+    func updateIsolatedCodexModelSelectionReasoningEffort(_ reasoningEffort: String) {
+        guard var selection = isolatedCodexModelSelection else { return }
+        selection.selectedReasoningEffort = reasoningEffort
+        isolatedCodexModelSelection = selection
+    }
+
+    func cancelIsolatedCodexModelSelection() {
+        isolatedCodexModelSelection = nil
+        isolatedCodexModelSelectionError = nil
+    }
+
+    func confirmIsolatedCodexModelSelection() async {
+        isolatedCodexModelSelectionError = nil
+
+        guard let selection = isolatedCodexModelSelection else { return }
+        guard database.account(id: selection.accountID) != nil else {
+            isolatedCodexModelSelectionError = L10n.tr("当前账号不存在。")
+            return
+        }
+        guard launchingIsolatedInstanceAccountID == nil else { return }
+
+        launchingIsolatedInstanceAccountID = selection.accountID
+        defer {
+            if launchingIsolatedInstanceAccountID == selection.accountID {
+                launchingIsolatedInstanceAccountID = nil
+            }
+        }
+
+        let previousDefaultModel = database.account(id: selection.accountID)?.defaultModel
+        let previousDefaultModelReasoningEffort = database.account(id: selection.accountID)?.defaultModelReasoningEffort
+        var didPersistSelection = false
+
+        do {
+            if let index = database.accounts.firstIndex(where: { $0.id == selection.accountID }) {
+                database.accounts[index].defaultModel = selection.selectedModel
+                database.accounts[index].defaultModelReasoningEffort = selection.selectedReasoningEffort
+            }
+            try await persistDatabase()
+            didPersistSelection = true
+            guard let updatedAccount = database.account(id: selection.accountID) else {
+                throw NSError(
+                    domain: "AppViewModel",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: L10n.tr("当前账号不存在。")]
+                )
+            }
+            try await performIsolatedCodexLaunch(for: updatedAccount)
+            isolatedCodexModelSelection = nil
+        } catch {
+            stopTrackingIsolatedInstance(for: selection.accountID)
+            if !didPersistSelection,
+               let index = database.accounts.firstIndex(where: { $0.id == selection.accountID })
+            {
+                database.accounts[index].defaultModel = previousDefaultModel
+                database.accounts[index].defaultModelReasoningEffort = previousDefaultModelReasoningEffort
+            }
+            isolatedCodexModelSelectionError = error.localizedDescription
+        }
+    }
+
+    private func prepareIsolatedCodexModelSelection(for account: ManagedAccount) async {
+        if hasLaunchedIsolatedInstance(for: account.id) {
+            pushBanner(level: .info, message: L10n.tr("账号 %@ 的独立实例已在当前会话中启动。", account.displayName))
+            return
+        }
+        guard canLaunchIsolatedCodex(for: account) else {
+            return
+        }
+        guard launchingIsolatedInstanceAccountID == nil else { return }
+
+        launchingIsolatedInstanceAccountID = account.id
+        isolatedCodexModelSelectionError = nil
+        defer {
+            if launchingIsolatedInstanceAccountID == account.id {
+                launchingIsolatedInstanceAccountID = nil
+            }
+        }
+
+        do {
+            let selection = try await resolveIsolatedCodexModelSelection(for: account)
+            isolatedCodexModelSelection = IsolatedCodexModelSelectionState(
+                accountID: account.id,
+                accountDisplayName: account.displayName,
+                availableModels: selection.availableModels,
+                availableReasoningEfforts: Self.supportedCodexReasoningEfforts,
+                selectedModel: selection.selectedModel,
+                selectedReasoningEffort: account.resolvedDefaultModelReasoningEffort
+            )
+        } catch {
+            isolatedCodexModelSelectionError = error.localizedDescription
+            pushBanner(level: .error, message: L10n.tr("加载启动模型失败：%@", error.localizedDescription))
+        }
+    }
+
+    private func resolveIsolatedCodexModelSelection(
+        for account: ManagedAccount
+    ) async throws -> ResolvedCodexDesktopModelSelection {
+        switch account.providerRule {
+        case .openAICompatible:
+            guard let credential = try latestCredential(for: account).providerAPIKeyCredential else {
+                throw CredentialStoreError.unexpectedData
+            }
+            return try await cliEnvironmentResolver.resolveCodexDesktopModelSelection(
+                for: account,
+                providerAPIKeyCredential: credential,
+                copilotCredential: nil,
+                copilotStatus: nil
+            )
+        case .githubCopilot:
+            let copilotLaunchState = try await copilotLaunchState(for: account, updatesDefaultModel: false)
+            return try await cliEnvironmentResolver.resolveCodexDesktopModelSelection(
+                for: account,
+                providerAPIKeyCredential: nil,
+                copilotCredential: copilotLaunchState.credential,
+                copilotStatus: copilotLaunchState.status
+            )
+        case .chatgptOAuth, .claudeCompatible, .claudeProfile:
+            throw CLIEnvironmentResolverError.codexCLINotSupported
+        }
+    }
+
+    private func performIsolatedCodexLaunch(for account: ManagedAccount) async throws {
+        switch account.providerRule {
+        case .openAICompatible:
+            try await launchProviderIsolatedCodexImpl(for: account)
+            pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
+        case .githubCopilot:
+            try await launchCopilotIsolatedCodexImpl(for: account)
+            pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
+        case .chatgptOAuth:
+            await launchChatGPTIsolatedCodex(for: account)
+        case .claudeCompatible, .claudeProfile:
+            pushBanner(level: .warning, message: unsupportedMessage(for: account.platform))
+        }
+    }
+
+    private func launchProviderIsolatedCodexImpl(for account: ManagedAccount) async throws {
+        guard let credential = try latestCredential(for: account).providerAPIKeyCredential else {
+            throw CredentialStoreError.unexpectedData
+        }
+        let context = try await cliEnvironmentResolver.resolveCodexDesktopContext(
+            for: account,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: credential,
+            copilotCredential: nil,
+            copilotStatus: nil,
+            copilotResponsesBridgeManager: copilotResponsesBridgeManager,
+            openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
+            claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
+        )
+        let onTermination = beginTrackingIsolatedInstance(for: account.id)
+        _ = try instanceLauncher.launchIsolatedInstance(context: context, onTermination: onTermination)
+    }
+
+    private func launchCopilotIsolatedCodexImpl(for account: ManagedAccount) async throws {
+        let copilotLaunchState = try await resolvedCopilotLaunchState(for: account)
+        let context = try await cliEnvironmentResolver.resolveCodexDesktopContext(
+            for: account,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: nil,
+            copilotCredential: copilotLaunchState.credential,
+            copilotStatus: copilotLaunchState.status,
+            copilotResponsesBridgeManager: copilotResponsesBridgeManager,
+            openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
+            claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
+        )
+        let onTermination = beginTrackingIsolatedInstance(for: account.id)
+        _ = try instanceLauncher.launchIsolatedInstance(context: context, onTermination: onTermination)
     }
 
     @discardableResult
@@ -995,22 +1196,7 @@ final class AppViewModel: ObservableObject {
         }
 
         do {
-            guard let credential = try latestCredential(for: account).providerAPIKeyCredential else {
-                throw CredentialStoreError.unexpectedData
-            }
-            let context = try await cliEnvironmentResolver.resolveCodexDesktopContext(
-                for: account,
-                appPaths: paths,
-                authPayload: nil,
-                providerAPIKeyCredential: credential,
-                copilotCredential: nil,
-                copilotStatus: nil,
-                copilotResponsesBridgeManager: copilotResponsesBridgeManager,
-                openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
-                claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
-            )
-            let onTermination = beginTrackingIsolatedInstance(for: account.id)
-            _ = try instanceLauncher.launchIsolatedInstance(context: context, onTermination: onTermination)
+            try await launchProviderIsolatedCodexImpl(for: account)
             pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
         } catch {
             stopTrackingIsolatedInstance(for: account.id)
@@ -1033,20 +1219,7 @@ final class AppViewModel: ObservableObject {
         }
 
         do {
-            let copilotLaunchState = try await resolvedCopilotLaunchState(for: account)
-            let context = try await cliEnvironmentResolver.resolveCodexDesktopContext(
-                for: account,
-                appPaths: paths,
-                authPayload: nil,
-                providerAPIKeyCredential: nil,
-                copilotCredential: copilotLaunchState.credential,
-                copilotStatus: copilotLaunchState.status,
-                copilotResponsesBridgeManager: copilotResponsesBridgeManager,
-                openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
-                claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
-            )
-            let onTermination = beginTrackingIsolatedInstance(for: account.id)
-            _ = try instanceLauncher.launchIsolatedInstance(context: context, onTermination: onTermination)
+            try await launchCopilotIsolatedCodexImpl(for: account)
             pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
         } catch {
             stopTrackingIsolatedInstance(for: account.id)
@@ -1246,18 +1419,21 @@ final class AppViewModel: ObservableObject {
         pendingRestartPromptMessage = nil
 
         do {
-        switch account.providerRule {
-        case .chatgptOAuth:
-            let payload = try await latestPayloadForSwitch(for: account)
-            try authFileManager.activatePreservingFileIdentity(payload)
-        case .claudeProfile:
-            let credential = try latestCredential(for: account)
-            if let snapshotRef = credential.claudeProfileSnapshotRef {
-                try claudeProfileManager.activateProfile(snapshotRef)
+            switch account.providerRule {
+            case .chatgptOAuth:
+                let payload = try await latestPayloadForSwitch(for: account)
+                _ = try await syncMainCodexHome(for: account)
+                try authFileManager.activatePreservingFileIdentity(payload)
+            case .claudeProfile:
+                let credential = try latestCredential(for: account)
+                if let snapshotRef = credential.claudeProfileSnapshotRef {
+                    try claudeProfileManager.activateProfile(snapshotRef)
+                }
+            case .openAICompatible, .claudeCompatible, .githubCopilot:
+                if account.platform == .codex {
+                    _ = try await syncMainCodexHome(for: account)
+                }
             }
-        case .openAICompatible, .claudeCompatible, .githubCopilot:
-            break
-        }
             setActiveAccount(account.id)
             selectedAccountID = account.id
             database.appendLog(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
@@ -1267,6 +1443,19 @@ final class AppViewModel: ObservableObject {
             if account.providerRule == .chatgptOAuth {
                 verifyingSwitchAccountID = account.id
                 await verifySwitch(at: Date(), for: account.id)
+            } else if account.platform == .codex {
+                if hasRunningMainCodexDesktop {
+                    let message = L10n.tr("Codex 主实例配置已切换到账号 %@，需要重启 Codex 才会加载新的模型目录与凭据。", account.displayName)
+                    restartRecommendedAccountID = account.id
+                    shouldPromptRestartAfterSwitch = true
+                    pendingRestartPromptMessage = message
+                    pushBanner(level: .warning, message: message, action: .restartCodex)
+                } else {
+                    pushBanner(
+                        level: .info,
+                        message: L10n.tr("已切换到账号 %@；Codex 主实例配置已同步，可直接启动主实例。", account.displayName)
+                    )
+                }
             } else {
                 pushBanner(level: .info, message: L10n.tr("已切换到账号 %@。", account.displayName))
             }
@@ -1736,6 +1925,7 @@ final class AppViewModel: ObservableObject {
             providerBaseURL: providerBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             providerAPIKeyEnvName: providerAPIKeyEnvName.trimmingCharacters(in: .whitespacesAndNewlines),
             defaultModel: defaultModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            defaultModelReasoningEffort: existing?.defaultModelReasoningEffort,
             defaultCLITarget: existing?.defaultCLITarget ?? providerRule.defaultTarget,
             createdAt: existing?.createdAt ?? Date(),
             lastUsedAt: existing?.lastUsedAt,
@@ -1771,6 +1961,7 @@ final class AppViewModel: ObservableObject {
             providerBaseURL: nil,
             providerAPIKeyEnvName: nil,
             defaultModel: credential.defaultModel ?? existing?.defaultModel,
+            defaultModelReasoningEffort: existing?.defaultModelReasoningEffort,
             defaultCLITarget: existing?.defaultCLITarget ?? .codex,
             createdAt: existing?.createdAt ?? Date(),
             lastUsedAt: existing?.lastUsedAt,
@@ -2091,10 +2282,17 @@ final class AppViewModel: ObservableObject {
     private func resolvedCopilotLaunchState(
         for account: ManagedAccount
     ) async throws -> (credential: CopilotCredential, status: CopilotAccountStatus?) {
+        try await copilotLaunchState(for: account, updatesDefaultModel: true)
+    }
+
+    private func copilotLaunchState(
+        for account: ManagedAccount,
+        updatesDefaultModel: Bool
+    ) async throws -> (credential: CopilotCredential, status: CopilotAccountStatus?) {
         let credential = try await resolvedCopilotCredential(for: account)
         let status = try? await copilotStatusRefresher.fetchStatus(using: credential)
 
-        if let status {
+        if updatesDefaultModel, let status {
             if let resolvedModel = resolvedCopilotModel(
                 preferredModel: account.defaultModel,
                 status: status,
@@ -2158,6 +2356,74 @@ final class AppViewModel: ObservableObject {
         } catch {
             database.appendLog(level: .warning, message: L10n.tr("切换前在线刷新账号 %@ 失败，已回退本地缓存凭据：%@", account.displayName, error.localizedDescription))
             return cachedPayload
+        }
+    }
+
+    private func syncMainCodexHome(for account: ManagedAccount) async throws -> [String: String] {
+        let managedHomeWriter = CodexManagedHomeWriter()
+
+        switch account.providerRule {
+        case .chatgptOAuth:
+            try managedHomeWriter.syncMainHome(
+                codexHomeURL: paths.codex.homeURL,
+                authPayload: nil,
+                clearAuthFile: false,
+                configFileContents: nil,
+                modelCatalogSnapshot: nil
+            )
+            return [:]
+        case .openAICompatible, .claudeCompatible:
+            guard account.platform == .codex else {
+                return [:]
+            }
+            guard let credential = try latestCredential(for: account).providerAPIKeyCredential else {
+                throw CredentialStoreError.unexpectedData
+            }
+            let context = try await cliEnvironmentResolver.resolveCodexDesktopContext(
+                for: account,
+                appPaths: paths,
+                authPayload: nil,
+                providerAPIKeyCredential: credential,
+                copilotCredential: nil,
+                copilotStatus: nil,
+                copilotResponsesBridgeManager: copilotResponsesBridgeManager,
+                openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
+                claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
+            )
+            try managedHomeWriter.syncMainHome(
+                codexHomeURL: paths.codex.homeURL,
+                authPayload: nil,
+                clearAuthFile: true,
+                configFileContents: context.configFileContents,
+                modelCatalogSnapshot: context.modelCatalogSnapshot
+            )
+            return context.environmentVariables
+        case .githubCopilot:
+            guard account.platform == .codex else {
+                return [:]
+            }
+            let copilotLaunchState = try await resolvedCopilotLaunchState(for: account)
+            let context = try await cliEnvironmentResolver.resolveCodexDesktopContext(
+                for: account,
+                appPaths: paths,
+                authPayload: nil,
+                providerAPIKeyCredential: nil,
+                copilotCredential: copilotLaunchState.credential,
+                copilotStatus: copilotLaunchState.status,
+                copilotResponsesBridgeManager: copilotResponsesBridgeManager,
+                openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
+                claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
+            )
+            try managedHomeWriter.syncMainHome(
+                codexHomeURL: paths.codex.homeURL,
+                authPayload: nil,
+                clearAuthFile: true,
+                configFileContents: context.configFileContents,
+                modelCatalogSnapshot: context.modelCatalogSnapshot
+            )
+            return context.environmentVariables
+        case .claudeProfile:
+            return [:]
         }
     }
 
@@ -2363,12 +2629,23 @@ final class AppViewModel: ObservableObject {
             await refreshCodexDesktopRunningState()
 
             do {
-                try await runtimeInspector.restartCodex()
+                let activeCodexAccount = activeAccount?.platform == .codex ? activeAccount : nil
+                let launchEnvironment: [String: String]
+                if let activeCodexAccount {
+                    launchEnvironment = try await syncMainCodexHome(for: activeCodexAccount)
+                } else {
+                    launchEnvironment = [:]
+                }
+                try await runtimeInspector.restartCodex(launchEnvironment: launchEnvironment)
                 restartRecommendedAccountID = nil
                 shouldPromptRestartAfterSwitch = false
                 pendingRestartPromptMessage = nil
                 await refreshCodexDesktopRunningState()
-                pushBanner(level: .info, message: L10n.tr("已请求重启 Codex，新的授权信息会在应用恢复后重新加载。"))
+                if activeCodexAccount?.providerRule == .chatgptOAuth {
+                    pushBanner(level: .info, message: L10n.tr("已请求重启 Codex，新的授权信息会在应用恢复后重新加载。"))
+                } else {
+                    pushBanner(level: .info, message: L10n.tr("已请求重启 Codex，主实例会按当前账号重新加载模型目录与凭据。"))
+                }
             } catch {
                 await refreshCodexDesktopRunningState()
                 let action: BannerAction? = hasRunningMainCodexDesktop ? .restartCodex : nil
@@ -2478,6 +2755,13 @@ final class AppViewModel: ObservableObject {
             }
         )
         sessionLogger?.info("quota_monitor.start", metadata: ["active_account_id": activeCodexAccountID?.uuidString ?? "none"])
+    }
+
+    private func shouldPreserveActiveAccountDuringCurrentAuthSync() -> Bool {
+        guard let activeAccount = database.account(id: database.activeAccountID) else {
+            return false
+        }
+        return activeAccount.providerRule != .chatgptOAuth
     }
 
     private func setActiveAccount(_ accountID: UUID?) {

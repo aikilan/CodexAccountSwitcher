@@ -126,6 +126,184 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(harness.model.restartPromptMessage)
     }
 
+    func testSwitchToCopilotMainAccountPromptsRestartAndSyncsRealCodexHome() async throws {
+        let currentAccountID = UUID()
+        let copilotAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(result: .verified, isRunning: true)
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential),
+            statusResult: .success(
+                CopilotAccountStatus(
+                    availableModels: ["gpt-4.1", "claude-opus-4.1"],
+                    currentModel: "gpt-4.1",
+                    quotaSnapshot: nil
+                )
+            )
+        )
+        resolver.desktopContextResult = .success(
+            ResolvedCodexDesktopLaunchContext(
+                accountID: copilotAccountID,
+                codexHomeURL: URL(fileURLWithPath: "/tmp/unused"),
+                authPayload: nil,
+                modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: ["gpt-4.1", "claude-opus-4.1"]),
+                configFileContents: """
+                model = "gpt-4.1"
+                model_reasoning_effort = "high"
+                model_provider = "github-copilot"
+
+                [model_providers.github-copilot]
+                name = "GitHub Copilot"
+                wire_api = "responses"
+                env_key = "GITHUB_TOKEN"
+                """,
+                environmentVariables: ["GITHUB_TOKEN": "copilot_access_token"]
+            )
+        )
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector,
+            activeAccountID: currentAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: false
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotProvider: copilotProvider,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let configURL = harness.model.paths.codex.homeURL.appendingPathComponent("config.toml")
+        let authFileURL = harness.model.paths.codex.homeURL.appendingPathComponent("auth.json")
+        let modelCatalogURL = harness.model.paths.codex.homeURL.appendingPathComponent("orbit-main-model-catalog.json")
+        try "theme = \"dark\"\n".write(to: configURL, atomically: true, encoding: .utf8)
+        try "legacy-auth".write(to: authFileURL, atomically: true, encoding: .utf8)
+
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+        await harness.model.switchToAccount(account)
+
+        let configContents = try String(contentsOf: configURL, encoding: .utf8)
+        XCTAssertEqual(harness.model.activeAccount?.id, copilotAccountID)
+        XCTAssertEqual(harness.model.banner?.action, .restartCodex)
+        XCTAssertTrue(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertEqual(
+            harness.model.restartPromptMessage,
+            L10n.tr("Codex 主实例配置已切换到账号 %@，需要重启 Codex 才会加载新的模型目录与凭据。", account.displayName)
+        )
+        XCTAssertTrue(configContents.contains("theme = \"dark\""))
+        XCTAssertTrue(configContents.contains("# orbit-managed:start main-codex"))
+        XCTAssertTrue(configContents.contains("model_provider = \"github-copilot\""))
+        XCTAssertTrue(configContents.contains("orbit-main-model-catalog.json"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: modelCatalogURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: authFileURL.path))
+    }
+
+    func testSwitchToProviderMainAccountPromptsRestartImmediately() async throws {
+        let currentAccountID = UUID()
+        let providerAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(result: .verified, isRunning: true)
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopContextResult = .success(
+            ResolvedCodexDesktopLaunchContext(
+                accountID: providerAccountID,
+                codexHomeURL: URL(fileURLWithPath: "/tmp/unused"),
+                authPayload: nil,
+                modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: ["deepseek-chat"]),
+                configFileContents: """
+                model = "deepseek-chat"
+                model_reasoning_effort = "medium"
+                model_provider = "deepseek"
+
+                [model_providers.deepseek]
+                name = "DeepSeek"
+                wire_api = "responses"
+                base_url = "https://api.deepseek.com/v1"
+                env_key = "DEEPSEEK_API_KEY"
+                """,
+                environmentVariables: ["DEEPSEEK_API_KEY": "sk-deepseek"]
+            )
+        )
+        let providerAccount = makeProviderAccount(
+            id: providerAccountID,
+            platform: .codex,
+            identifier: "provider_deepseek",
+            displayName: "DeepSeek Work",
+            email: "deepseek@example.com",
+            rule: .openAICompatible,
+            presetID: "deepseek",
+            providerDisplayName: "DeepSeek",
+            baseURL: "https://api.deepseek.com/v1",
+            envName: "DEEPSEEK_API_KEY",
+            model: "deepseek-chat"
+        )
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector,
+            activeAccountID: currentAccountID,
+            extraSeeds: [
+                AccountSeed(account: providerAccount, payload: try makeProviderCredential("sk-deepseek"), snapshot: nil)
+            ],
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == providerAccountID }))
+
+        await harness.model.switchToAccount(account)
+
+        XCTAssertEqual(harness.model.activeAccount?.id, providerAccountID)
+        XCTAssertEqual(harness.model.banner?.action, .restartCodex)
+        XCTAssertTrue(harness.model.shouldPromptRestartAfterSwitch)
+        XCTAssertEqual(
+            harness.model.restartPromptMessage,
+            L10n.tr("Codex 主实例配置已切换到账号 %@，需要重启 Codex 才会加载新的模型目录与凭据。", account.displayName)
+        )
+    }
+
     func testRestartVisibilityUsesCachedRuntimeState() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
@@ -284,6 +462,173 @@ final class AppViewModelTests: XCTestCase {
             harness.model.banner?.message,
             L10n.tr("已请求重启 Codex，新的授权信息会在应用恢复后重新加载。")
         )
+    }
+
+    func testRestartActionPassesLaunchEnvironmentForActiveCopilotMainAccount() async throws {
+        let currentAccountID = UUID()
+        let copilotAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(result: .verified, isRunning: false)
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential),
+            statusResult: .success(
+                CopilotAccountStatus(
+                    availableModels: ["gpt-4.1"],
+                    currentModel: "gpt-4.1",
+                    quotaSnapshot: nil
+                )
+            )
+        )
+        resolver.desktopContextResult = .success(
+            ResolvedCodexDesktopLaunchContext(
+                accountID: copilotAccountID,
+                codexHomeURL: URL(fileURLWithPath: "/tmp/unused"),
+                authPayload: nil,
+                modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: ["gpt-4.1"]),
+                configFileContents: """
+                model = "gpt-4.1"
+                model_reasoning_effort = "medium"
+                model_provider = "github-copilot"
+                """,
+                environmentVariables: [
+                    "GITHUB_TOKEN": "copilot_access_token",
+                    "OPENAI_BASE_URL": "http://127.0.0.1:18081",
+                ]
+            )
+        )
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector,
+            activeAccountID: copilotAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: true
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotProvider: copilotProvider,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        await harness.model.performBannerAction(.restartCodex)
+
+        XCTAssertEqual(runtimeInspector.restartCallCount, 1)
+        XCTAssertEqual(
+            runtimeInspector.lastRestartLaunchEnvironment,
+            [
+                "GITHUB_TOKEN": "copilot_access_token",
+                "OPENAI_BASE_URL": "http://127.0.0.1:18081",
+            ]
+        )
+        XCTAssertEqual(
+            harness.model.banner?.message,
+            L10n.tr("已请求重启 Codex，主实例会按当前账号重新加载模型目录与凭据。")
+        )
+    }
+
+    func testSwitchBackToChatGPTRemovesMainManagedBlock() async throws {
+        let currentAccountID = UUID()
+        let providerAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let runtimeInspector = MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopContextResult = .success(
+            ResolvedCodexDesktopLaunchContext(
+                accountID: providerAccountID,
+                codexHomeURL: URL(fileURLWithPath: "/tmp/unused"),
+                authPayload: nil,
+                modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: ["deepseek-chat"]),
+                configFileContents: """
+                model = "deepseek-chat"
+                model_reasoning_effort = "medium"
+                model_provider = "deepseek"
+                """,
+                environmentVariables: ["DEEPSEEK_API_KEY": "sk-deepseek"]
+            )
+        )
+        let providerAccount = makeProviderAccount(
+            id: providerAccountID,
+            platform: .codex,
+            identifier: "provider_deepseek",
+            displayName: "DeepSeek Work",
+            email: "deepseek@example.com",
+            rule: .openAICompatible,
+            presetID: "deepseek",
+            providerDisplayName: "DeepSeek",
+            baseURL: "https://api.deepseek.com/v1",
+            envName: "DEEPSEEK_API_KEY",
+            model: "deepseek-chat"
+        )
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: runtimeInspector,
+            activeAccountID: currentAccountID,
+            extraSeeds: [
+                AccountSeed(account: providerAccount, payload: try makeProviderCredential("sk-deepseek"), snapshot: nil)
+            ],
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let configURL = harness.model.paths.codex.homeURL.appendingPathComponent("config.toml")
+        let modelCatalogURL = harness.model.paths.codex.homeURL.appendingPathComponent("orbit-main-model-catalog.json")
+        try "theme = \"dark\"\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let provider = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == providerAccountID }))
+        await harness.model.switchToAccount(provider)
+        XCTAssertTrue(try String(contentsOf: configURL, encoding: .utf8).contains("# orbit-managed:start main-codex"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: modelCatalogURL.path))
+
+        let chatgptAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == currentAccountID }))
+        await harness.model.switchToAccount(chatgptAccount)
+
+        let configContents = try String(contentsOf: configURL, encoding: .utf8)
+        XCTAssertTrue(configContents.contains("theme = \"dark\""))
+        XCTAssertFalse(configContents.contains("# orbit-managed:start main-codex"))
+        XCTAssertFalse(configContents.contains("orbit-main-model-catalog.json"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: modelCatalogURL.path))
     }
 
     func testRefreshAccountStatusFormatsQuotaAsRemainingPercent() async throws {
@@ -647,6 +992,81 @@ final class AppViewModelTests: XCTestCase {
         )
     }
 
+    func testPreparePassivelyImportsCurrentCodexAuthWhenCopilotIsActive() async throws {
+        let currentAccountID = UUID()
+        let copilotAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = makeSignedLikePayload(
+            accountID: "acct_imported",
+            refreshToken: "refresh_imported",
+            displayName: "Imported User",
+            email: "imported@example.com",
+            planType: "team"
+        )
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: copilotAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: true
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ]
+        )
+
+        await harness.model.prepare()
+
+        XCTAssertEqual(harness.model.activeAccount?.id, copilotAccountID)
+        XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccountID)
+        XCTAssertTrue(harness.model.accounts.contains(where: { $0.codexAccountID == "acct_imported" }))
+        XCTAssertTrue(
+            harness.model.database.switchLogs.contains {
+                $0.message == L10n.tr(
+                    "检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。",
+                    "Imported User"
+                )
+            }
+        )
+    }
+
     func testReconcileCurrentAuthStateKeepsSelectedCodexAccountWhenClaudeIsActive() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -753,6 +1173,87 @@ final class AppViewModelTests: XCTestCase {
                 $0.message == L10n.tr(
                     "检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。",
                     "Reconciled User"
+                )
+            }
+        )
+    }
+
+    func testReconcileCurrentAuthStateKeepsCopilotAccountActive() async throws {
+        let currentAccountID = UUID()
+        let copilotAccountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let authFileManager = RecordingAuthFileManager()
+
+        let harness = try await makeHarness(
+            accountID: currentAccountID,
+            cachedPayload: cachedPayload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: false
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ]
+        )
+
+        await harness.model.prepare()
+        let copilotAccount = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+
+        await harness.model.switchToAccount(copilotAccount)
+        XCTAssertEqual(harness.model.activeAccount?.id, copilotAccountID)
+
+        authFileManager.currentAuth = makeSignedLikePayload(
+            accountID: "acct_actual",
+            refreshToken: "refresh_actual",
+            displayName: "Actual User",
+            email: "actual@example.com",
+            planType: "team"
+        )
+
+        await harness.model.reconcileCurrentAuthState()
+
+        XCTAssertEqual(harness.model.activeAccount?.id, copilotAccountID)
+        XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccountID)
+        XCTAssertTrue(harness.model.accounts.contains(where: { $0.codexAccountID == "acct_actual" }))
+        XCTAssertTrue(
+            harness.model.database.switchLogs.contains {
+                $0.message == L10n.tr(
+                    "检测到当前 ~/.codex/auth.json 正在使用账号 %@，已同步账号信息，但未切换当前账号。",
+                    "Actual User"
                 )
             }
         )
@@ -2761,6 +3262,13 @@ final class AppViewModelTests: XCTestCase {
         let accountID = UUID()
         let cachedPayload = try makeAPIKeyPayload("sk-test-old")
         let launcher = RecordingCodexInstanceLauncher()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .success(
+            ResolvedCodexDesktopModelSelection(
+                selectedModel: "gpt-5.4",
+                availableModels: ["gpt-5.4", "gpt-4.1"]
+            )
+        )
 
         let harness = try await makeHarness(
             accountID: accountID,
@@ -2769,7 +3277,8 @@ final class AppViewModelTests: XCTestCase {
             oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
             runtimeInspector: MockRuntimeInspector(result: .verified),
             activeAccountID: accountID,
-            instanceLauncher: launcher
+            instanceLauncher: launcher,
+            cliEnvironmentResolver: resolver
         )
 
         await harness.model.prepare()
@@ -2780,10 +3289,31 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.launchIsolatedCodex(for: account)
 
+        XCTAssertEqual(launcher.launchCallCount, 0)
+        XCTAssertEqual(
+            harness.model.isolatedCodexModelSelection,
+            IsolatedCodexModelSelectionState(
+                accountID: account.id,
+                accountDisplayName: account.displayName,
+                availableModels: ["gpt-5.4", "gpt-4.1"],
+                availableReasoningEfforts: ["low", "medium", "high", "xhigh"],
+                selectedModel: "gpt-5.4",
+                selectedReasoningEffort: "medium"
+            )
+        )
+        harness.model.updateIsolatedCodexModelSelection("gpt-4.1")
+        harness.model.updateIsolatedCodexModelSelectionReasoningEffort("high")
+
+        await harness.model.confirmIsolatedCodexModelSelection()
+
         XCTAssertEqual(launcher.launchCallCount, 1)
         XCTAssertNil(launcher.lastPayload)
         XCTAssertEqual(launcher.lastContext?.environmentVariables["OPENAI_API_KEY"], "sk-test-old")
-        XCTAssertTrue(launcher.lastContext?.configFileContents?.contains("model_provider = \"openai\"") == true)
+        XCTAssertEqual(launcher.lastContext?.modelCatalogSnapshot, ResolvedCodexModelCatalogSnapshot(availableModels: ["gpt-4.1"]))
+        XCTAssertEqual(harness.model.accounts.first?.defaultModel, "gpt-4.1")
+        XCTAssertEqual(harness.model.accounts.first?.defaultModelReasoningEffort, "high")
+        XCTAssertTrue(launcher.lastContext?.configFileContents?.contains("model_reasoning_effort = \"high\"") == true)
+        XCTAssertNil(harness.model.isolatedCodexModelSelection)
         XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
     }
@@ -2793,6 +3323,12 @@ final class AppViewModelTests: XCTestCase {
         let copilotAccountID = UUID()
         let launcher = RecordingCodexInstanceLauncher()
         let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .success(
+            ResolvedCodexDesktopModelSelection(
+                selectedModel: "gpt-4.1",
+                availableModels: ["gpt-4.1", "claude-opus-4.1"]
+            )
+        )
         let copilotCredential = CopilotCredential(
             host: "https://github.com",
             login: "aikilan",
@@ -2857,15 +3393,139 @@ final class AppViewModelTests: XCTestCase {
 
         let providerSnapshot = await copilotProvider.snapshot()
         XCTAssertEqual(providerSnapshot.resolveCallCount, 1)
+        XCTAssertEqual(launcher.launchCallCount, 0)
+        XCTAssertEqual(
+            harness.model.isolatedCodexModelSelection,
+            IsolatedCodexModelSelectionState(
+                accountID: copilotAccountID,
+                accountDisplayName: "GitHub Copilot • aikilan",
+                availableModels: ["gpt-4.1", "claude-opus-4.1"],
+                availableReasoningEfforts: ["low", "medium", "high", "xhigh"],
+                selectedModel: "gpt-4.1",
+                selectedReasoningEffort: "medium"
+            )
+        )
+        harness.model.updateIsolatedCodexModelSelection("claude-opus-4.1")
+        harness.model.updateIsolatedCodexModelSelectionReasoningEffort("xhigh")
+
+        await harness.model.confirmIsolatedCodexModelSelection()
+
         XCTAssertEqual(launcher.launchCallCount, 1)
         XCTAssertNil(launcher.lastPayload)
         XCTAssertEqual(launcher.lastContext?.accountID, copilotAccountID)
         XCTAssertEqual(
             launcher.lastContext?.modelCatalogSnapshot,
-            ResolvedCodexModelCatalogSnapshot(availableModels: ["gpt-4.1"])
+            ResolvedCodexModelCatalogSnapshot(availableModels: ["claude-opus-4.1"])
         )
+        XCTAssertEqual(
+            harness.model.accounts.first(where: { $0.id == copilotAccountID })?.defaultModel,
+            "claude-opus-4.1"
+        )
+        XCTAssertEqual(
+            harness.model.accounts.first(where: { $0.id == copilotAccountID })?.defaultModelReasoningEffort,
+            "xhigh"
+        )
+        XCTAssertTrue(launcher.lastContext?.configFileContents?.contains("model_reasoning_effort = \"xhigh\"") == true)
+        XCTAssertNil(harness.model.isolatedCodexModelSelection)
         XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
+    }
+
+    func testCancelIsolatedCodexModelSelectionDoesNotLaunchOrPersistModel() async throws {
+        let accountID = UUID()
+        let cachedPayload = try makeAPIKeyPayload("sk-test-old")
+        let launcher = RecordingCodexInstanceLauncher()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .success(
+            ResolvedCodexDesktopModelSelection(
+                selectedModel: "gpt-5.4",
+                availableModels: ["gpt-5.4", "gpt-4.1"]
+            )
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            instanceLauncher: launcher,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.launchIsolatedCodex(for: account)
+        harness.model.updateIsolatedCodexModelSelection("gpt-4.1")
+        harness.model.updateIsolatedCodexModelSelectionReasoningEffort("high")
+        harness.model.cancelIsolatedCodexModelSelection()
+
+        XCTAssertEqual(launcher.launchCallCount, 0)
+        XCTAssertNil(harness.model.isolatedCodexModelSelection)
+        XCTAssertEqual(harness.model.accounts.first?.defaultModel, "gpt-5.4")
+        XCTAssertNil(harness.model.accounts.first?.defaultModelReasoningEffort)
+    }
+
+    func testLaunchIsolatedCodexShowsModelSelectionFailure() async throws {
+        let accountID = UUID()
+        let cachedPayload = try makeAPIKeyPayload("sk-test-old")
+        let launcher = RecordingCodexInstanceLauncher()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .failure(MockError.cliLaunchFailed)
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            instanceLauncher: launcher,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.launchIsolatedCodex(for: account)
+
+        XCTAssertEqual(launcher.launchCallCount, 0)
+        XCTAssertNil(harness.model.isolatedCodexModelSelection)
+        XCTAssertEqual(harness.model.isolatedCodexModelSelectionError, "cli launch failed")
+        XCTAssertEqual(harness.model.banner?.message, L10n.tr("加载启动模型失败：%@", "cli launch failed"))
+    }
+
+    func testConfirmIsolatedCodexModelSelectionLaunchesSingleModelAccount() async throws {
+        let accountID = UUID()
+        let cachedPayload = try makeAPIKeyPayload("sk-test-old")
+        let launcher = RecordingCodexInstanceLauncher()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .success(
+            ResolvedCodexDesktopModelSelection(
+                selectedModel: "gpt-5.4",
+                availableModels: ["gpt-5.4"]
+            )
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            instanceLauncher: launcher,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first)
+
+        await harness.model.launchIsolatedCodex(for: account)
+        await harness.model.confirmIsolatedCodexModelSelection()
+
+        XCTAssertEqual(launcher.launchCallCount, 1)
+        XCTAssertNil(harness.model.isolatedCodexModelSelection)
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
     }
 
     func testStartProviderDesktopLaunchValidatesRequiredFields() async throws {
@@ -3731,6 +4391,7 @@ private final class MockRuntimeInspector: @unchecked Sendable, CodexRuntimeInspe
     private(set) var hasRunningMainApplicationCallCount = 0
     private var isRunning: Bool
     private(set) var restartCallCount = 0
+    private(set) var lastRestartLaunchEnvironment: [String: String]?
     private let hasRunningMainApplicationDelay: Duration?
     private let restartDelay: Duration?
     private let runningStateAfterRestart: Bool?
@@ -3765,8 +4426,9 @@ private final class MockRuntimeInspector: @unchecked Sendable, CodexRuntimeInspe
         result
     }
 
-    func restartCodex() async throws {
+    func restartCodex(launchEnvironment: [String: String]) async throws {
         restartCallCount += 1
+        lastRestartLaunchEnvironment = launchEnvironment
         if let restartDelay {
             try? await Task.sleep(for: restartDelay)
         }
@@ -3883,7 +4545,25 @@ private actor RecordingCopilotProvider: CopilotProviderServing {
     }
 }
 
-private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolving {
+private final class RecordingDesktopCLIEnvironmentResolver: @unchecked Sendable, CLIEnvironmentResolving {
+    var desktopModelSelectionResult: Result<ResolvedCodexDesktopModelSelection, Error>?
+    var desktopContextResult: Result<ResolvedCodexDesktopLaunchContext, Error>?
+
+    func resolveCodexDesktopModelSelection(
+        for account: ManagedAccount,
+        providerAPIKeyCredential: ProviderAPIKeyCredential?,
+        copilotCredential: CopilotCredential?,
+        copilotStatus: CopilotAccountStatus?
+    ) async throws -> ResolvedCodexDesktopModelSelection {
+        if let desktopModelSelectionResult {
+            return try desktopModelSelectionResult.get()
+        }
+        return ResolvedCodexDesktopModelSelection(
+            selectedModel: account.resolvedDefaultModel,
+            availableModels: [account.resolvedDefaultModel]
+        )
+    }
+
     func resolveCodexContext(
         for account: ManagedAccount,
         workingDirectoryURL: URL,
@@ -3910,6 +4590,18 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexDesktopLaunchContext {
+        if let desktopContextResult {
+            return try desktopContextResult.get()
+        }
+
+        var environmentVariables: [String: String] = [:]
+        if let providerAPIKeyCredential, !account.resolvedProviderAPIKeyEnvName.isEmpty {
+            environmentVariables[account.resolvedProviderAPIKeyEnvName] = providerAPIKeyCredential.apiKey
+        }
+        if let copilotCredential, let accessToken = copilotCredential.accessToken ?? copilotCredential.githubAccessToken {
+            environmentVariables["GITHUB_TOKEN"] = accessToken
+        }
+
         return ResolvedCodexDesktopLaunchContext(
             accountID: account.id,
             codexHomeURL: appPaths.appSupportDirectoryURL
@@ -3918,8 +4610,11 @@ private final class RecordingDesktopCLIEnvironmentResolver: CLIEnvironmentResolv
                 .appendingPathComponent("codex-home", isDirectory: true),
             authPayload: authPayload,
             modelCatalogSnapshot: ResolvedCodexModelCatalogSnapshot(availableModels: [account.resolvedDefaultModel]),
-            configFileContents: "desktop-config",
-            environmentVariables: [account.resolvedProviderAPIKeyEnvName: providerAPIKeyCredential?.apiKey ?? ""]
+            configFileContents: """
+            model = "\(account.resolvedDefaultModel)"
+            model_reasoning_effort = "\(account.resolvedDefaultModelReasoningEffort)"
+            """,
+            environmentVariables: environmentVariables
         )
     }
 

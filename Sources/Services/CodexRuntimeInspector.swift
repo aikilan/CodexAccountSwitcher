@@ -44,7 +44,7 @@ final class CodexRuntimeInspector: @unchecked Sendable {
     private let runningApplications: @Sendable () async -> [RunningCodexApplication]
     private let resolveApplicationURL: @Sendable () async -> URL?
     private let isIsolatedApplication: @Sendable (pid_t) async -> Bool
-    private let openApplication: @Sendable (URL) async throws -> Void
+    private let openApplication: @Sendable (URL, [String: String]) async throws -> Void
 
     init(logReader: SQLiteLogReader) {
         self.logReader = logReader
@@ -55,8 +55,8 @@ final class CodexRuntimeInspector: @unchecked Sendable {
             await Self.mainApplicationURL()
         }
         self.isIsolatedApplication = Self.isolatedApplication
-        self.openApplication = { appURL in
-            try await Self.openMainApplication(at: appURL)
+        self.openApplication = { appURL, launchEnvironment in
+            try await Self.openMainApplication(at: appURL, launchEnvironment: launchEnvironment)
         }
     }
 
@@ -65,7 +65,7 @@ final class CodexRuntimeInspector: @unchecked Sendable {
         runningApplications: @escaping @Sendable () async -> [RunningCodexApplication],
         resolveApplicationURL: @escaping @Sendable () async -> URL?,
         isIsolatedApplication: @escaping @Sendable (pid_t) async -> Bool,
-        openApplication: @escaping @Sendable (URL) async throws -> Void
+        openApplication: @escaping @Sendable (URL, [String: String]) async throws -> Void
     ) {
         self.logReader = logReader
         self.runningApplications = runningApplications
@@ -87,7 +87,7 @@ final class CodexRuntimeInspector: @unchecked Sendable {
             },
             resolveApplicationURL: { nil },
             isIsolatedApplication: { _ in false },
-            openApplication: { _ in }
+            openApplication: { _, _ in }
         )
     }
 
@@ -129,7 +129,7 @@ final class CodexRuntimeInspector: @unchecked Sendable {
         return .restartRecommended
     }
 
-    func restartCodex() async throws {
+    func restartCodex(launchEnvironment: [String: String]) async throws {
         let runningApps = await runningApplications()
         let mainApps = await runningMainApplications(from: runningApps)
         let fallbackApplicationURL = await resolveApplicationURL()
@@ -158,7 +158,7 @@ final class CodexRuntimeInspector: @unchecked Sendable {
             }
         }
 
-        try await openApplication(appURL)
+        try await openApplication(appURL, launchEnvironment)
     }
 
     private func runningMainApplications() async -> [RunningCodexApplication] {
@@ -235,8 +235,16 @@ final class CodexRuntimeInspector: @unchecked Sendable {
         }.value
     }
 
+    private static func openMainApplication(at appURL: URL, launchEnvironment: [String: String]) async throws {
+        if launchEnvironment.isEmpty {
+            try await openMainApplicationViaWorkspace(at: appURL)
+        } else {
+            try await launchMainApplicationProcess(at: appURL, launchEnvironment: launchEnvironment)
+        }
+    }
+
     @MainActor
-    private static func openMainApplication(at appURL: URL) async throws {
+    private static func openMainApplicationViaWorkspace(at appURL: URL) async throws {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.createsNewApplicationInstance = true
@@ -249,6 +257,39 @@ final class CodexRuntimeInspector: @unchecked Sendable {
                 completionHandler: completionHandler
             )
         }
+    }
+
+    private static func launchMainApplicationProcess(at appURL: URL, launchEnvironment: [String: String]) async throws {
+        let executableURL = executableURL(for: appURL)
+        var environment = ProcessInfo.processInfo.environment
+        for (key, value) in launchEnvironment {
+            environment[key] = value
+        }
+
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = []
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            throw CodexRuntimeInspectorError.relaunchFailed(error.localizedDescription)
+        }
+    }
+
+    private static func executableURL(for appURL: URL) -> URL {
+        if let executableURL = Bundle(url: appURL)?.executableURL {
+            return URL(fileURLWithPath: executableURL.path)
+        }
+
+        let executableName = appURL.deletingPathExtension().lastPathComponent
+        return appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent(executableName, isDirectory: false)
     }
 
     static func openMainApplicationCompletionHandler(
