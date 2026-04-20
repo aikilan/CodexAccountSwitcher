@@ -35,6 +35,12 @@ struct OrbitApp: App {
                 .preferredColorScheme(preferredColorScheme)
                 .frame(minWidth: 620, minHeight: 460)
         }
+
+        Window(L10n.tr("ACP 调试"), id: "copilot-acp-debug") {
+            CopilotACPDebugView(store: model.copilotACPDebugStore)
+                .preferredColorScheme(preferredColorScheme)
+                .frame(minWidth: 980, minHeight: 640)
+        }
     }
 
     private var preferredColorScheme: ColorScheme? {

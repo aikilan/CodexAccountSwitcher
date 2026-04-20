@@ -6,7 +6,9 @@ struct UnimplementedCopilotResponsesBridgeManager: CopilotResponsesBridgeManagin
         credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) async throws -> PreparedCopilotResponsesBridge {
         throw CopilotResponsesBridgeManagerError.bridgeStartFailed
     }

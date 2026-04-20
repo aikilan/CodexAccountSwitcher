@@ -210,6 +210,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 credential: copilotCredential,
                 status: copilotStatus,
                 workingDirectoryURL: workingDirectoryURL,
+                appPaths: appPaths,
                 copilotResponsesBridgeManager: copilotResponsesBridgeManager
             )
             let codexHomeURL = isolatedCodexHomeURL(
@@ -308,6 +309,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 credential: copilotCredential,
                 status: copilotStatus,
                 workingDirectoryURL: fileManager.homeDirectoryForCurrentUser,
+                appPaths: appPaths,
                 copilotResponsesBridgeManager: copilotResponsesBridgeManager
             )
             return ResolvedCodexDesktopLaunchContext(
@@ -474,7 +476,9 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
                 credential: copilotCredential,
                 model: launchConfiguration.model,
                 availableModels: launchConfiguration.availableModels,
-                workingDirectoryURL: workingDirectoryURL
+                workingDirectoryURL: workingDirectoryURL,
+                configDirectoryURL: copilotConfigDirectoryURL(for: copilotCredential, appPaths: appPaths),
+                reasoningEffort: account.resolvedDefaultModelReasoningEffort
             )
             return try resolvedBridgedClaudeContext(
                 for: account,
@@ -626,6 +630,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         credential: CopilotCredential,
         status: CopilotAccountStatus?,
         workingDirectoryURL: URL,
+        appPaths: AppPaths,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging
     ) async throws -> ResolvedCodexProviderEnvironment {
         let launchConfiguration = copilotLaunchConfiguration(
@@ -638,7 +643,9 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             credential: credential,
             model: launchConfiguration.model,
             availableModels: launchConfiguration.availableModels,
-            workingDirectoryURL: workingDirectoryURL
+            workingDirectoryURL: workingDirectoryURL,
+            configDirectoryURL: copilotConfigDirectoryURL(for: credential, appPaths: appPaths),
+            reasoningEffort: account.resolvedDefaultModelReasoningEffort
         )
 
         return ResolvedCodexProviderEnvironment(
@@ -696,6 +703,16 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
         variables["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"] = provider.model
         variables["CLAUDE_CODE_SUBAGENT_MODEL"] = provider.model
         return variables
+    }
+
+    private func copilotConfigDirectoryURL(
+        for credential: CopilotCredential,
+        appPaths: AppPaths
+    ) -> URL {
+        if let configDirectoryName = credential.configDirectoryName {
+            return appPaths.copilotManagedConfigDirectoryURL(named: configDirectoryName)
+        }
+        return CopilotCLIConfiguration.defaultConfigDirectoryURL(fileManager: fileManager)
     }
 
     private func availableModelsForBridge(
@@ -892,10 +909,10 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             model = "gpt-4.1"
         }
 
-        let availableModels = mergedCopilotAvailableModels(
-            liveAvailableModels + [currentModel, credentialModel].compactMap { $0 },
-            defaultModel: model
-        )
+        let availableModelCandidates = liveAvailableModels.isEmpty
+            ? [currentModel, credentialModel].compactMap { $0 }
+            : liveAvailableModels
+        let availableModels = mergedCopilotAvailableModels(availableModelCandidates, defaultModel: model)
         return (model, availableModels)
     }
 

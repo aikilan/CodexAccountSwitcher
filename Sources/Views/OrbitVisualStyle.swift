@@ -130,7 +130,7 @@ enum OrbitPalette {
     )
 
     private static func rgba(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> NSColor {
-        NSColor(calibratedRed: red, green: green, blue: blue, alpha: alpha)
+        NSColor(deviceRed: red, green: green, blue: blue, alpha: alpha)
     }
 
     private static func dynamicColor(light: NSColor, dark: NSColor) -> Color {

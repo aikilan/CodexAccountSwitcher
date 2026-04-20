@@ -19,6 +19,10 @@ protocol TerminalCommandLaunching: Sendable {
     func launch(command: String) throws
 }
 
+protocol CopilotCLIInstalling: Sendable {
+    func installCLI() async throws
+}
+
 protocol OAuthClienting: Sendable {
     func beginBrowserLogin(openURL: @escaping @Sendable (URL) -> Bool) async throws -> BrowserOAuthSession
     func completeBrowserLogin(session: BrowserOAuthSession) async throws -> AuthLoginResult
@@ -134,6 +138,11 @@ struct PreparedCopilotResponsesBridge: Equatable, Sendable {
     let apiKey: String
 }
 
+struct ManagedCopilotConfigBootstrapResult: Equatable, Sendable {
+    let credential: CopilotCredential
+    let configDirectoryURL: URL
+}
+
 struct ResolvedCodexDesktopModelSelection: Equatable, Sendable {
     let selectedModel: String
     let availableModels: [String]
@@ -145,8 +154,19 @@ protocol CopilotResponsesBridgeManaging: Sendable {
         credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) async throws -> PreparedCopilotResponsesBridge
+}
+
+protocol CopilotManagedConfigManaging: Sendable {
+    func bootstrap(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String?,
+        reasoningEffort: String
+    ) async throws -> ManagedCopilotConfigBootstrapResult
 }
 
 protocol ClaudeProviderCodexBridgeManaging: Sendable {

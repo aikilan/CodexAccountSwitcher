@@ -21,6 +21,7 @@ struct CopilotCLIConfiguration: Equatable, Sendable {
     let host: String
     let login: String
     let defaultModel: String?
+    let effortLevel: String?
 
     static func defaultConfigDirectoryURL(fileManager: FileManager = .default) -> URL {
         fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".copilot", isDirectory: true)
@@ -37,17 +38,40 @@ struct CopilotCLIConfiguration: Equatable, Sendable {
 
     func write(to configDirectoryURL: URL) throws {
         try FileManager.default.createDirectory(at: configDirectoryURL, withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(
-            ConfigurationFile(
-                loggedInUsers: [ConfigurationAccount(host: host, login: login)],
-                lastLoggedInUser: ConfigurationAccount(host: host, login: login),
-                model: defaultModel
-            )
-        )
+        let configURL = configDirectoryURL.appendingPathComponent("config.json", isDirectory: false)
+        var object: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: configURL.path),
+           let data = try? Data(contentsOf: configURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            object = existing
+        }
+
+        object.removeValue(forKey: "logged_in_users")
+        object.removeValue(forKey: "last_logged_in_user")
+        object["loggedInUsers"] = [[
+            "host": host,
+            "login": login,
+        ]]
+        object["lastLoggedInUser"] = [
+            "host": host,
+            "login": login,
+        ]
+        object["banner"] = "never"
+        if let defaultModel {
+            object["model"] = defaultModel
+        } else {
+            object.removeValue(forKey: "model")
+        }
+        if let effortLevel {
+            object["effortLevel"] = effortLevel
+        } else {
+            object.removeValue(forKey: "effortLevel")
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         try data.write(
-            to: configDirectoryURL.appendingPathComponent("config.json", isDirectory: false),
+            to: configURL,
             options: .atomic
         )
     }
@@ -59,41 +83,49 @@ struct CopilotCLIConfiguration: Equatable, Sendable {
         }
 
         let data = try Data(contentsOf: configURL)
-        let file = try JSONDecoder().decode(ConfigurationFile.self, from: data)
-        guard let account = file.lastLoggedInUser ?? file.loggedInUsers.first else {
+        guard let file = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CopilotCLIConfigurationError.invalidConfiguration
+        }
+        let loggedInUsers = (file["loggedInUsers"] as? [Any]) ?? (file["logged_in_users"] as? [Any]) ?? []
+        let lastLoggedInUser = file["lastLoggedInUser"] ?? file["last_logged_in_user"]
+        guard
+            let accountValue = account(from: lastLoggedInUser) ?? loggedInUsers.compactMap(account(from:)).first
+        else {
             throw CopilotCLIConfigurationError.noLoggedInUser
         }
 
-        let host = account.host.trimmingCharacters(in: .whitespacesAndNewlines)
-        let login = account.login.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = accountValue.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let login = accountValue.login.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty, !login.isEmpty else {
             throw CopilotCLIConfigurationError.invalidConfiguration
         }
 
-        let defaultModel = file.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultModel = (file["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effortLevel = (file["effortLevel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return CopilotCLIConfiguration(
             host: host,
             login: login,
-            defaultModel: defaultModel?.isEmpty == false ? defaultModel : nil
+            defaultModel: defaultModel?.isEmpty == false ? defaultModel : nil,
+            effortLevel: effortLevel?.isEmpty == false ? effortLevel : nil
         )
     }
 }
 
 private extension CopilotCLIConfiguration {
-    struct ConfigurationAccount: Codable, Equatable {
+    struct ConfigurationAccount: Equatable {
         let host: String
         let login: String
     }
 
-    struct ConfigurationFile: Codable, Equatable {
-        let loggedInUsers: [ConfigurationAccount]
-        let lastLoggedInUser: ConfigurationAccount?
-        let model: String?
-
-        private enum CodingKeys: String, CodingKey {
-            case loggedInUsers = "logged_in_users"
-            case lastLoggedInUser = "last_logged_in_user"
-            case model
+    static func account(from value: Any?) -> ConfigurationAccount? {
+        guard let object = value as? [String: Any] else {
+            return nil
         }
+        let host = (object["host"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let login = (object["login"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !host.isEmpty, !login.isEmpty else {
+            return nil
+        }
+        return ConfigurationAccount(host: host, login: login)
     }
 }

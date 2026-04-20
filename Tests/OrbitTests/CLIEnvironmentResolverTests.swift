@@ -281,6 +281,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             isActive: false
         )
         let credential = try CopilotCredential(
+            configDirectoryName: "acct-bridge",
             host: "https://github.com",
             login: "aikilan",
             defaultModel: "gpt-5.3-codex"
@@ -301,6 +302,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         let snapshot = await bridgeManager.snapshot()
         XCTAssertEqual(snapshot.lastModel, "gpt-4.1")
         XCTAssertEqual(snapshot.lastAvailableModels, ["gpt-4.1"])
+        XCTAssertEqual(snapshot.lastConfigDirectoryURL, paths.copilotManagedConfigDirectoryURL(named: "acct-bridge"))
+        XCTAssertEqual(snapshot.lastReasoningEffort, "medium")
         XCTAssertEqual(context.modelCatalogSnapshot?.availableModels, ["gpt-4.1"])
         XCTAssertTrue(context.configFileContents?.contains("model = \"gpt-4.1\"") == true)
     }
@@ -333,6 +336,7 @@ final class CLIEnvironmentResolverTests: XCTestCase {
             isActive: false
         )
         let credential = try CopilotCredential(
+            configDirectoryName: "acct-live-models",
             host: "https://github.com",
             login: "aikilan",
             defaultModel: "gpt-5.3-codex"
@@ -359,6 +363,8 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         let snapshot = await bridgeManager.snapshot()
         XCTAssertEqual(snapshot.lastModel, "gpt-4.1")
         XCTAssertEqual(snapshot.lastAvailableModels, ["gpt-4.1", "gpt-4o"])
+        XCTAssertEqual(snapshot.lastConfigDirectoryURL, paths.copilotManagedConfigDirectoryURL(named: "acct-live-models"))
+        XCTAssertEqual(snapshot.lastReasoningEffort, "medium")
         XCTAssertEqual(context.modelCatalogSnapshot?.availableModels, ["gpt-4.1", "gpt-4o"])
         XCTAssertTrue(context.configFileContents?.contains("model = \"gpt-4.1\"") == true)
     }
@@ -1054,7 +1060,9 @@ private struct ResolverCopilotResponsesBridgeManager: CopilotResponsesBridgeMana
         credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) async throws -> PreparedCopilotResponsesBridge {
         PreparedCopilotResponsesBridge(
             baseURL: "http://127.0.0.1:18083",
@@ -1138,20 +1146,28 @@ private actor RecordingResolverCopilotResponsesBridgeManager: CopilotResponsesBr
     struct Snapshot: Equatable {
         let lastModel: String?
         let lastAvailableModels: [String]
+        let lastConfigDirectoryURL: URL?
+        let lastReasoningEffort: String?
     }
 
     private var lastModel: String?
     private var lastAvailableModels = [String]()
+    private var lastConfigDirectoryURL: URL?
+    private var lastReasoningEffort: String?
 
     func prepareBridge(
         accountID: UUID,
         credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) async throws -> PreparedCopilotResponsesBridge {
         lastModel = model
         lastAvailableModels = availableModels
+        lastConfigDirectoryURL = configDirectoryURL
+        lastReasoningEffort = reasoningEffort
         return PreparedCopilotResponsesBridge(
             baseURL: "http://127.0.0.1:18083",
             apiKeyEnvName: "OPENAI_API_KEY",
@@ -1160,6 +1176,11 @@ private actor RecordingResolverCopilotResponsesBridgeManager: CopilotResponsesBr
     }
 
     func snapshot() -> Snapshot {
-        Snapshot(lastModel: lastModel, lastAvailableModels: lastAvailableModels)
+        Snapshot(
+            lastModel: lastModel,
+            lastAvailableModels: lastAvailableModels,
+            lastConfigDirectoryURL: lastConfigDirectoryURL,
+            lastReasoningEffort: lastReasoningEffort
+        )
     }
 }

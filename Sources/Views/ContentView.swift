@@ -93,6 +93,23 @@ struct ContentView: View {
                 Text(L10n.tr("如果这是当前激活账号，第二个选项会让本机当前 Codex 处于登出状态。"))
             }
         }
+        .confirmationDialog(
+            L10n.tr("安装 GitHub Copilot CLI"),
+            isPresented: Binding(
+                get: { model.copilotCLIInstallPrompt != nil },
+                set: { if !$0, model.copilotCLIInstallPrompt != nil { model.cancelCopilotCLIInstall() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(L10n.tr("安装")) {
+                Task { await model.confirmCopilotCLIInstall() }
+            }
+            Button(L10n.tr("取消"), role: .cancel) {
+                model.cancelCopilotCLIInstall()
+            }
+        } message: {
+            Text(L10n.tr("当前机器未安装可用的 `copilot` CLI。是否需要 Orbit 帮你通过 npm 安装？"))
+        }
     }
 
     private var accountSidebar: some View {
@@ -263,6 +280,13 @@ struct ContentView: View {
                 presentProviderDesktopLaunchWindow()
             } label: {
                 Label(L10n.tr("预设启动 Codex"), systemImage: "bolt.circle.fill")
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                presentWindow(id: "copilot-acp-debug")
+            } label: {
+                Label(L10n.tr("ACP 调试"), systemImage: "ladybug")
             }
             .buttonStyle(.bordered)
 

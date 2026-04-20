@@ -723,10 +723,10 @@ private extension CopilotNativeProvider {
         }
 
         var accounts = [LocalConfigSnapshot.Account]()
-        if let last = configAccount(from: object["last_logged_in_user"]) {
+        if let last = configAccount(from: object["lastLoggedInUser"] ?? object["last_logged_in_user"]) {
             accounts.append(last)
         }
-        if let rawAccounts = object["logged_in_users"] as? [Any] {
+        if let rawAccounts = (object["loggedInUsers"] as? [Any]) ?? (object["logged_in_users"] as? [Any]) {
             for rawAccount in rawAccounts {
                 guard let account = configAccount(from: rawAccount),
                       !accounts.contains(where: { $0.host == account.host && $0.login == account.login })

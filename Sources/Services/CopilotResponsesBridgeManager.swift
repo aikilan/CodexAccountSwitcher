@@ -16,11 +16,11 @@ enum CopilotResponsesBridgeManagerError: LocalizedError, Equatable {
 }
 
 actor CopilotResponsesBridgeManager {
-    private let provider: any CopilotProviderServing
     private var servers: [String: CopilotResponsesBridgeServer] = [:]
+    private let debugStore: CopilotACPDebugStore?
 
-    init(provider: any CopilotProviderServing) {
-        self.provider = provider
+    init(debugStore: CopilotACPDebugStore? = nil) {
+        self.debugStore = debugStore
     }
 
     func prepareBridge(
@@ -28,15 +28,18 @@ actor CopilotResponsesBridgeManager {
         credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) async throws -> PreparedCopilotResponsesBridge {
         let key = "\(accountID.uuidString)|\(workingDirectoryURL.standardizedFileURL.path)"
-        let server = servers[key] ?? CopilotResponsesBridgeServer(provider: provider)
+        let server = servers[key] ?? CopilotResponsesBridgeServer(debugStore: debugStore)
         server.update(
-            credential: credential,
             model: model,
             availableModels: availableModels,
-            workingDirectoryURL: workingDirectoryURL
+            workingDirectoryURL: workingDirectoryURL,
+            configDirectoryURL: configDirectoryURL,
+            reasoningEffort: reasoningEffort
         )
         let baseURL = try await server.startIfNeeded()
         servers[key] = server
@@ -65,43 +68,43 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
     }
 
     private struct State: Sendable {
-        let credential: CopilotCredential
         let defaultModel: String
         let availableModels: [String]
         let workingDirectoryURL: URL
+        let configDirectoryURL: URL
+        let defaultReasoningEffort: String
+        let bridgeBaseURL: String
     }
 
     private let queue = DispatchQueue(label: "com.openai.Orbit.copilot-responses-bridge")
     private let stateQueue = DispatchQueue(label: "com.openai.Orbit.copilot-responses-bridge.state")
-    private let provider: any CopilotProviderServing
 
     private var listener: NWListener?
     private var localBaseURL: String?
-    private var credential = CopilotCredential(
-        configDirectoryName: "",
-        host: "https://github.com",
-        login: "",
-        defaultModel: nil
-    )
     private var defaultModel = "gpt-4.1"
     private var availableModels = ["gpt-4.1"]
     private var workingDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+    private var configDirectoryURL = CopilotCLIConfiguration.defaultConfigDirectoryURL()
+    private var defaultReasoningEffort = "medium"
+    private let debugStore: CopilotACPDebugStore?
 
-    init(provider: any CopilotProviderServing) {
-        self.provider = provider
+    init(debugStore: CopilotACPDebugStore? = nil) {
+        self.debugStore = debugStore
     }
 
     func update(
-        credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) {
         stateQueue.sync {
-            self.credential = credential
             self.defaultModel = normalizedModelCandidate(model) ?? "gpt-4.1"
             self.availableModels = normalizedAvailableModels(availableModels, fallbackModel: self.defaultModel)
             self.workingDirectoryURL = workingDirectoryURL.standardizedFileURL
+            self.configDirectoryURL = configDirectoryURL.standardizedFileURL
+            self.defaultReasoningEffort = trimmedString(reasoningEffort) ?? "medium"
         }
     }
 
@@ -182,8 +185,7 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
             if let request = parseRequest(from: nextBuffer) {
                 Task { [weak self] in
                     guard let self else { return }
-                    let response = await self.response(for: request)
-                    self.send(response: response, through: connection)
+                    await self.handle(request: request, through: connection)
                 }
                 return
             }
@@ -245,58 +247,108 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
         )
     }
 
-    private func response(for request: HTTPRequest) async -> HTTPResponse {
+    private func handle(request: HTTPRequest, through connection: NWConnection) async {
         switch (request.method, request.path) {
         case ("POST", "/responses"), ("POST", "/v1/responses"):
-            return await responsesResponse(for: request)
+            await sendResponsesResponse(for: request, through: connection)
         case ("GET", "/models"), ("GET", "/v1/models"):
-            return jsonResponse(statusCode: 200, body: jsonData(["data": modelObjects()]))
+            send(response: jsonResponse(statusCode: 200, body: jsonData(["data": modelObjects()])), through: connection)
         default:
-            return jsonResponse(statusCode: 404, body: errorPayload(message: L10n.tr("不支持的 GitHub Copilot bridge 路径。")))
+            send(
+                response: jsonResponse(statusCode: 404, body: errorPayload(message: L10n.tr("不支持的 GitHub Copilot bridge 路径。"))),
+                through: connection
+            )
         }
     }
 
-    private func responsesResponse(for request: HTTPRequest) async -> HTTPResponse {
+    private func sendResponsesResponse(for request: HTTPRequest, through connection: NWConnection) async {
+        let requestID = UUID()
+        var didStartDebugRequest = false
         do {
             let state = currentState()
             let requestObject = try requestJSONObject(from: request.body)
             let wantsStream = (requestObject["stream"] as? Bool) ?? false
             let requestedModel = trimmedString(requestObject["model"]) ?? state.defaultModel
-            let upstreamRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
-                from: request.body,
-                fallbackModel: requestedModel
+            let requestedReasoningEffort = trimmedString(requestObject["reasoning_effort"])
+                ?? state.defaultReasoningEffort
+            let prompt = try promptText(from: requestObject)
+            await recordRequestStarted(
+                id: requestID,
+                state: state,
+                path: request.path,
+                model: requestedModel,
+                reasoningEffort: requestedReasoningEffort,
+                payloadPreview: Self.payloadPreview(from: request.body)
             )
-            let (statusCode, data) = try await provider.sendChatCompletions(
-                using: state.credential,
-                body: upstreamRequest
-            )
-            guard (200..<300).contains(statusCode) else {
-                return jsonResponse(
-                    statusCode: statusCode,
-                    body: errorPayload(message: ResponsesChatCompletionsBridge.extractErrorMessage(from: data))
-                )
-            }
+            didStartDebugRequest = true
 
-            let responseData = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
-                from: data,
-                fallbackModel: requestedModel
+            let client = CopilotACPClient(
+                configDirectoryURL: state.configDirectoryURL,
+                debugEventHandler: debugEventHandler(for: requestID)
             )
-            guard let responseObject = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
-                throw ResponsesChatCompletionsBridge.TranslationError.invalidResponse(L10n.tr("本地桥接响应格式无效。"))
-            }
 
             if wantsStream {
-                return HTTPResponse(
-                    statusCode: 200,
-                    contentType: "text/event-stream",
-                    body: ResponsesChatCompletionsBridge.makeResponseStreamData(from: responseObject)
+                await streamResponsesResponse(
+                    requestID: requestID,
+                    client: client,
+                    connection: connection,
+                    state: state,
+                    model: requestedModel,
+                    reasoningEffort: requestedReasoningEffort,
+                    prompt: prompt
                 )
+                return
             }
 
-            return jsonResponse(statusCode: 200, body: responseData)
+            let result = try await client.prompt(
+                workingDirectoryURL: state.workingDirectoryURL,
+                model: requestedModel,
+                reasoningEffort: requestedReasoningEffort,
+                prompt: prompt
+            )
+            let responseData = jsonData(responseObject(from: result))
+            guard (try JSONSerialization.jsonObject(with: responseData) as? [String: Any]) != nil else {
+                throw CopilotResponsesBridgeManagerError.invalidRequest
+            }
+
+            await recordRequestFinished(id: requestID, status: .completed, httpStatus: 200, errorMessage: nil)
+            send(response: jsonResponse(statusCode: 200, body: responseData), through: connection)
         } catch {
             let message = error.localizedDescription
-            return jsonResponse(statusCode: statusCode(for: message), body: errorPayload(message: message))
+            let statusCode = statusCode(for: message)
+            if didStartDebugRequest {
+                await recordRequestFinished(id: requestID, status: .failed, httpStatus: statusCode, errorMessage: message)
+            }
+            send(response: jsonResponse(statusCode: statusCode, body: errorPayload(message: message)), through: connection)
+        }
+    }
+
+    private func streamResponsesResponse(
+        requestID: UUID,
+        client: CopilotACPClient,
+        connection: NWConnection,
+        state: State,
+        model: String,
+        reasoningEffort: String,
+        prompt: String
+    ) async {
+        let stream = CopilotResponsesStreamResponse(connection: connection, model: model)
+        await stream.start()
+        do {
+            _ = try await client.promptStream(
+                workingDirectoryURL: state.workingDirectoryURL,
+                model: model,
+                reasoningEffort: reasoningEffort,
+                prompt: prompt
+            ) { event in
+                await stream.send(event: event)
+            }
+            await stream.complete()
+            await recordRequestFinished(id: requestID, status: .completed, httpStatus: 200, errorMessage: nil)
+        } catch {
+            let message = error.localizedDescription
+            await stream.fail(message: message)
+            await recordRequestFinished(id: requestID, status: .failed, httpStatus: 200, errorMessage: message)
         }
     }
 
@@ -310,11 +362,93 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
     private func currentState() -> State {
         stateQueue.sync {
             State(
-                credential: credential,
                 defaultModel: defaultModel,
                 availableModels: availableModels,
-                workingDirectoryURL: workingDirectoryURL
+                workingDirectoryURL: workingDirectoryURL,
+                configDirectoryURL: configDirectoryURL,
+                defaultReasoningEffort: defaultReasoningEffort,
+                bridgeBaseURL: localBaseURL ?? ""
             )
+        }
+    }
+
+    @MainActor
+    private func recordRequestStarted(
+        id: UUID,
+        state: State,
+        path: String,
+        model: String,
+        reasoningEffort: String,
+        payloadPreview: String?
+    ) {
+        debugStore?.recordRequestStarted(
+            id: id,
+            bridgeBaseURL: state.bridgeBaseURL,
+            path: path,
+            model: model,
+            reasoningEffort: reasoningEffort,
+            workingDirectoryPath: state.workingDirectoryURL.path,
+            configDirectoryPath: state.configDirectoryURL.path,
+            payloadPreview: payloadPreview
+        )
+    }
+
+    @MainActor
+    private func recordRequestFinished(
+        id: UUID,
+        status: CopilotACPDebugRequestStatus,
+        httpStatus: Int?,
+        errorMessage: String?
+    ) {
+        debugStore?.recordRequestFinished(
+            id: id,
+            status: status,
+            httpStatus: httpStatus,
+            errorMessage: errorMessage
+        )
+    }
+
+    private func debugEventHandler(for requestID: UUID) -> CopilotACPDebugEventHandler? {
+        guard let debugStore else { return nil }
+        return { event in
+            await MainActor.run {
+                switch event {
+                case let .processStarted(info):
+                    debugStore.recordACPCommand(
+                        requestID: requestID,
+                        commandLine: info.commandLine,
+                        processID: info.processID
+                    )
+                case let .request(method, payloadPreview):
+                    debugStore.appendEvent(
+                        requestID: requestID,
+                        title: L10n.tr("ACP 请求"),
+                        detail: method,
+                        payloadPreview: payloadPreview
+                    )
+                case let .response(method, payloadPreview):
+                    debugStore.appendEvent(
+                        requestID: requestID,
+                        title: L10n.tr("ACP 响应"),
+                        detail: method,
+                        payloadPreview: payloadPreview
+                    )
+                case let .notification(method, payloadPreview):
+                    debugStore.appendEvent(
+                        requestID: requestID,
+                        title: L10n.tr("ACP 通知"),
+                        detail: method,
+                        payloadPreview: payloadPreview
+                    )
+                case let .error(message):
+                    debugStore.appendEvent(
+                        requestID: requestID,
+                        title: L10n.tr("ACP 错误"),
+                        detail: message,
+                        payloadPreview: nil
+                    )
+                }
+            }
         }
     }
 
@@ -472,6 +606,14 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
         (try? JSONSerialization.data(withJSONObject: object, options: [])) ?? Data("{}".utf8)
     }
 
+    private static func payloadPreview(from data: Data) -> String {
+        let text = String(data: data, encoding: .utf8) ?? "<\(data.count) bytes>"
+        if text.count <= CopilotACPDebugStore.payloadPreviewLimit {
+            return text
+        }
+        return String(text.prefix(CopilotACPDebugStore.payloadPreviewLimit)) + "\n... truncated ..."
+    }
+
     private func modelObjects() -> [[String: Any]] {
         let state = currentState()
         let models = state.availableModels.isEmpty ? [state.defaultModel] : state.availableModels
@@ -571,5 +713,65 @@ private final class CopilotResponsesBridgeServer: @unchecked Sendable {
         default:
             return "Bad Gateway"
         }
+    }
+}
+
+private actor CopilotResponsesStreamResponse {
+    private let connection: NWConnection
+    private var encoder: CopilotResponsesStreamEncoder
+    private var isClosed = false
+
+    init(connection: NWConnection, model: String) {
+        self.connection = connection
+        self.encoder = CopilotResponsesStreamEncoder(model: model)
+    }
+
+    func start() async {
+        let header = [
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/event-stream",
+            "Cache-Control: no-cache",
+            "Connection: close",
+            "",
+            "",
+        ].joined(separator: "\r\n")
+        await send(Data(header.utf8))
+        await send(encoder.startData())
+    }
+
+    func send(event: CopilotACPStreamEvent) async {
+        if case let .error(message) = event {
+            await fail(message: message)
+            return
+        }
+        if case .completed = event {
+            return
+        }
+        await send(encoder.encode(event: event))
+    }
+
+    func complete() async {
+        await send(encoder.completeData())
+        close()
+    }
+
+    func fail(message: String) async {
+        await send(encoder.failureData(message: message))
+        close()
+    }
+
+    private func send(_ data: Data) async {
+        guard !data.isEmpty, !isClosed else { return }
+        await withCheckedContinuation { continuation in
+            connection.send(content: data, completion: .contentProcessed { _ in
+                continuation.resume()
+            })
+        }
+    }
+
+    private func close() {
+        guard !isClosed else { return }
+        isClosed = true
+        connection.cancel()
     }
 }

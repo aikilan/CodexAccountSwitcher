@@ -71,8 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 window.title = L10n.tr("Orbit")
             case "新增账号", "Add Account":
                 window.title = L10n.tr("新增账号")
-            case "预设启动 Codex":
+            case "预设启动 Codex", "Launch Codex Preset":
                 window.title = L10n.tr("预设启动 Codex")
+            case "ACP 调试", "ACP Debug":
+                window.title = L10n.tr("ACP 调试")
             default:
                 break
             }

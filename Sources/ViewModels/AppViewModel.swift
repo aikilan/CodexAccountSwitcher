@@ -102,6 +102,11 @@ struct IsolatedCodexModelSelectionState: Identifiable, Equatable {
     var id: UUID { accountID }
 }
 
+struct CopilotCLIInstallPromptState: Identifiable, Equatable {
+    let id = UUID()
+    let errorMessage: String
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private static let supportedCodexReasoningEfforts = ["low", "medium", "high", "xhigh"]
@@ -149,9 +154,11 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var launchingCLIAccountID: UUID?
     @Published var isolatedCodexModelSelection: IsolatedCodexModelSelectionState?
     @Published var isolatedCodexModelSelectionError: String?
+    @Published var copilotCLIInstallPrompt: CopilotCLIInstallPromptState?
 
     let paths: AppPaths
     let sessionLogger: AppSessionLogger?
+    let copilotACPDebugStore: CopilotACPDebugStore
 
     private let databaseStore: AppDatabaseStore
     private let credentialStore: any AccountCredentialStore
@@ -159,11 +166,13 @@ final class AppViewModel: ObservableObject {
     private let jwtDecoder: JWTClaimsDecoder
     private let oauthClient: any OAuthClienting
     private let terminalCommandLauncher: any TerminalCommandLaunching
+    private let copilotCLIInstaller: any CopilotCLIInstalling
     private let openExternalURL: (URL) -> Void
     private let claudeProfileManager: any ClaudeProfileManaging
     private let claudeAPIClient: any ClaudeAPIClienting
     private let copilotProvider: any CopilotProviderServing
     private let copilotStatusRefresher: any CopilotStatusRefreshing
+    private let copilotManagedConfigManager: any CopilotManagedConfigManaging
     private let quotaMonitor: any QuotaMonitoring
     private let userNotifier: any UserNotifying
     private let runtimeInspector: any CodexRuntimeInspecting
@@ -187,6 +196,8 @@ final class AppViewModel: ObservableObject {
     private var suppressActivationReconcileUntil: Date?
     private var dismissedLowQuotaRecommendationKey: String?
     private var notifiedLowQuotaRecommendationKey: String?
+    private var isInstallingCopilotCLI = false
+    private var pendingCopilotCLIInstallRetry: (@MainActor () async -> Void)?
 
     init(
         paths: AppPaths,
@@ -197,11 +208,13 @@ final class AppViewModel: ObservableObject {
         jwtDecoder: JWTClaimsDecoder,
         oauthClient: any OAuthClienting,
         terminalCommandLauncher: any TerminalCommandLaunching = TerminalCommandLauncher(),
+        copilotCLIInstaller: any CopilotCLIInstalling = CopilotCLIInstaller(),
         openExternalURL: @escaping (URL) -> Void = { url in _ = NSWorkspace.shared.open(url) },
         claudeProfileManager: any ClaudeProfileManaging,
         claudeAPIClient: any ClaudeAPIClienting,
         copilotProvider: any CopilotProviderServing,
         copilotStatusRefresher: any CopilotStatusRefreshing,
+        copilotManagedConfigManager: (any CopilotManagedConfigManaging)? = nil,
         quotaMonitor: any QuotaMonitoring,
         userNotifier: any UserNotifying,
         runtimeInspector: any CodexRuntimeInspecting,
@@ -213,6 +226,7 @@ final class AppViewModel: ObservableObject {
         appSupportPathRepairer: any AppSupportPathRepairing = AppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = CodexOAuthClaudeBridgeManager(),
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
+        copilotACPDebugStore: CopilotACPDebugStore = CopilotACPDebugStore(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = OpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = ClaudeProviderCodexBridgeManager(),
         platformRuntimes: [any PlatformRuntime] = [CodexPlatformRuntime(), ClaudePlatformRuntime()],
@@ -220,17 +234,24 @@ final class AppViewModel: ObservableObject {
     ) {
         self.paths = paths
         self.sessionLogger = sessionLogger
+        self.copilotACPDebugStore = copilotACPDebugStore
         self.databaseStore = databaseStore
         self.credentialStore = credentialStore
         self.authFileManager = authFileManager
         self.jwtDecoder = jwtDecoder
         self.oauthClient = oauthClient
         self.terminalCommandLauncher = terminalCommandLauncher
+        self.copilotCLIInstaller = copilotCLIInstaller
         self.openExternalURL = openExternalURL
         self.claudeProfileManager = claudeProfileManager
         self.claudeAPIClient = claudeAPIClient
         self.copilotProvider = copilotProvider
         self.copilotStatusRefresher = copilotStatusRefresher
+        self.copilotManagedConfigManager = copilotManagedConfigManager
+            ?? CopilotManagedConfigManager(
+                paths: paths,
+                terminalCommandLauncher: terminalCommandLauncher
+            )
         self.quotaMonitor = quotaMonitor
         self.userNotifier = userNotifier
         self.runtimeInspector = runtimeInspector
@@ -288,6 +309,7 @@ final class AppViewModel: ObservableObject {
             )
             let userNotifier = UserNotificationManager()
             let runtimeInspector = CodexRuntimeInspector(logReader: logReader)
+            let copilotACPDebugStore = CopilotACPDebugStore()
             sessionLogger?.info("runtime_inspector.init", metadata: ["state_database_path": paths.stateDatabaseURL.path])
             return AppViewModel(
                 paths: paths,
@@ -303,6 +325,10 @@ final class AppViewModel: ObservableObject {
                 claudeAPIClient: claudeAPIClient,
                 copilotProvider: copilotProvider,
                 copilotStatusRefresher: copilotStatusRefresher,
+                copilotManagedConfigManager: CopilotManagedConfigManager(
+                    paths: paths,
+                    terminalCommandLauncher: terminalCommandLauncher
+                ),
                 quotaMonitor: quotaMonitor,
                 userNotifier: userNotifier,
                 runtimeInspector: runtimeInspector,
@@ -312,7 +338,8 @@ final class AppViewModel: ObservableObject {
                 claudePatchedRuntimeManager: ClaudePatchedRuntimeManager(),
                 appSupportPathRepairer: AppSupportPathRepairer(),
                 codexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManager(),
-                copilotResponsesBridgeManager: CopilotResponsesBridgeManager(provider: copilotProvider),
+                copilotResponsesBridgeManager: CopilotResponsesBridgeManager(debugStore: copilotACPDebugStore),
+                copilotACPDebugStore: copilotACPDebugStore,
                 openAICompatibleProviderCodexBridgeManager: OpenAICompatibleProviderCodexBridgeManager(),
                 claudeProviderCodexBridgeManager: ClaudeProviderCodexBridgeManager(),
                 platformRuntimes: [CodexPlatformRuntime(), ClaudePlatformRuntime()]
@@ -833,6 +860,14 @@ final class AppViewModel: ObservableObject {
             )
             pushBanner(level: .info, message: successMessage)
         } catch {
+            guard !requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self, accountID = account.id, resolvedTarget, workingDirectoryURL] in
+                guard let self, let latestAccount = self.database.account(id: accountID) else { return }
+                await self.openCLI(
+                    for: latestAccount,
+                    target: resolvedTarget,
+                    workingDirectoryURL: workingDirectoryURL
+                )
+            }) else { return }
             let errorMessage = L10n.tr(
                 "打开 %@ 失败：%@",
                 resolvedTarget.displayName,
@@ -874,6 +909,60 @@ final class AppViewModel: ObservableObject {
     func cancelIsolatedCodexModelSelection() {
         isolatedCodexModelSelection = nil
         isolatedCodexModelSelectionError = nil
+    }
+
+    func confirmCopilotCLIInstall() async {
+        guard !isInstallingCopilotCLI else { return }
+
+        let retry = pendingCopilotCLIInstallRetry
+        copilotCLIInstallPrompt = nil
+        isInstallingCopilotCLI = true
+        pushBanner(level: .info, message: L10n.tr("正在安装 GitHub Copilot CLI..."))
+
+        do {
+            try await copilotCLIInstaller.installCLI()
+            isInstallingCopilotCLI = false
+            pendingCopilotCLIInstallRetry = nil
+            pushBanner(level: .info, message: L10n.tr("GitHub Copilot CLI 安装完成，正在继续当前操作。"))
+            if let retry {
+                await retry()
+            }
+        } catch {
+            isInstallingCopilotCLI = false
+            pendingCopilotCLIInstallRetry = nil
+            pushBanner(level: .error, message: L10n.tr("GitHub Copilot CLI 自动安装失败：%@", error.localizedDescription))
+        }
+    }
+
+    func cancelCopilotCLIInstall() {
+        let errorMessage = copilotCLIInstallPrompt?.errorMessage
+            ?? CopilotACPClientError.cliUnavailable.localizedDescription
+        copilotCLIInstallPrompt = nil
+        pendingCopilotCLIInstallRetry = nil
+        pushBanner(level: .error, message: errorMessage)
+    }
+
+    @discardableResult
+    private func requestCopilotCLIInstallIfUnavailable(
+        _ error: Error,
+        retry: @escaping @MainActor () async -> Void
+    ) -> Bool {
+        guard isCopilotCLIUnavailable(error) else {
+            return false
+        }
+        pendingCopilotCLIInstallRetry = retry
+        copilotCLIInstallPrompt = CopilotCLIInstallPromptState(errorMessage: error.localizedDescription)
+        return true
+    }
+
+    private func isCopilotCLIUnavailable(_ error: Error) -> Bool {
+        if case CopilotACPClientError.cliUnavailable = error {
+            return true
+        }
+        if case let CopilotACPClientError.serverExited(message) = error {
+            return message == CopilotACPClientError.cliUnavailable.localizedDescription
+        }
+        return error.localizedDescription == CopilotACPClientError.cliUnavailable.localizedDescription
     }
 
     func confirmIsolatedCodexModelSelection() async {
@@ -922,6 +1011,9 @@ final class AppViewModel: ObservableObject {
                 database.accounts[index].defaultModelReasoningEffort = previousDefaultModelReasoningEffort
             }
             isolatedCodexModelSelectionError = error.localizedDescription
+            _ = requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self] in
+                await self?.confirmIsolatedCodexModelSelection()
+            })
         }
     }
 
@@ -955,6 +1047,12 @@ final class AppViewModel: ObservableObject {
             )
         } catch {
             isolatedCodexModelSelectionError = error.localizedDescription
+            if requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self, accountID = account.id] in
+                guard let self, let latestAccount = self.database.account(id: accountID) else { return }
+                await self.prepareIsolatedCodexModelSelection(for: latestAccount)
+            }) {
+                return
+            }
             pushBanner(level: .error, message: L10n.tr("加载启动模型失败：%@", error.localizedDescription))
         }
     }
@@ -1223,6 +1321,10 @@ final class AppViewModel: ObservableObject {
             pushBanner(level: .info, message: L10n.tr("已为账号 %@ 启动独立 Codex 实例。", account.displayName))
         } catch {
             stopTrackingIsolatedInstance(for: account.id)
+            guard !requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self, accountID = account.id] in
+                guard let self, let latestAccount = self.database.account(id: accountID) else { return }
+                await self.launchCopilotIsolatedCodex(for: latestAccount)
+            }) else { return }
             pushBanner(level: .error, message: L10n.tr("启动独立 Codex 实例失败：%@", error.localizedDescription))
         }
     }
@@ -1462,6 +1564,10 @@ final class AppViewModel: ObservableObject {
         } catch {
             switchingAccountID = nil
             verifyingSwitchAccountID = nil
+            guard !requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self, accountID = account.id] in
+                guard let self, let latestAccount = self.database.account(id: accountID) else { return }
+                await self.switchToAccount(latestAccount)
+            }) else { return }
             pushBanner(level: .error, message: L10n.tr("账号切换失败：%@", error.localizedDescription))
             database.appendLog(level: .error, message: L10n.tr("账号切换失败：%@", error.localizedDescription))
             try? await persistDatabase()
@@ -1639,7 +1745,12 @@ final class AppViewModel: ObservableObject {
         credential: CopilotCredential
     ) async throws {
         let account = upsertCopilotAccount(identity: identity, credential: credential, makeActive: false)
-        try credentialStore.save(.copilot(credential), for: account.id)
+        let managedCredential = try await ensureManagedCopilotCredential(
+            for: account,
+            credential: credential,
+            model: account.defaultModel ?? credential.defaultModel
+        )
+        try credentialStore.save(.copilot(managedCredential), for: account.id)
         setActiveAccount(account.id)
         selectedAccountID = account.id
         database.appendLog(level: .info, message: L10n.tr("已登录并激活账号 %@。", account.displayName))
@@ -2289,15 +2400,18 @@ final class AppViewModel: ObservableObject {
         for account: ManagedAccount,
         updatesDefaultModel: Bool
     ) async throws -> (credential: CopilotCredential, status: CopilotAccountStatus?) {
-        let credential = try await resolvedCopilotCredential(for: account)
+        var credential = try await resolvedCopilotCredential(for: account)
         let status = try? await copilotStatusRefresher.fetchStatus(using: credential)
+        let resolvedModel = status.flatMap {
+            resolvedCopilotModel(
+                preferredModel: account.defaultModel,
+                status: $0,
+                fallbackModel: credential.defaultModel
+            )
+        } ?? account.defaultModel ?? credential.defaultModel
 
         if updatesDefaultModel, let status {
-            if let resolvedModel = resolvedCopilotModel(
-                preferredModel: account.defaultModel,
-                status: status,
-                fallbackModel: credential.defaultModel
-            ),
+            if let resolvedModel,
                let index = database.accounts.firstIndex(where: { $0.id == account.id })
             {
                 database.accounts[index].defaultModel = resolvedModel
@@ -2307,7 +2421,30 @@ final class AppViewModel: ObservableObject {
             }
         }
 
+        credential = try await ensureManagedCopilotCredential(
+            for: account,
+            credential: credential,
+            model: resolvedModel
+        )
+
         return (credential, status)
+    }
+
+    private func ensureManagedCopilotCredential(
+        for account: ManagedAccount,
+        credential: CopilotCredential,
+        model: String?
+    ) async throws -> CopilotCredential {
+        let bootstrap = try await copilotManagedConfigManager.bootstrap(
+            accountID: account.id,
+            credential: credential,
+            model: model,
+            reasoningEffort: account.resolvedDefaultModelReasoningEffort
+        )
+        if bootstrap.credential != credential {
+            try credentialStore.save(.copilot(bootstrap.credential), for: account.id)
+        }
+        return bootstrap.credential
     }
 
     private func resolvedCopilotModel(

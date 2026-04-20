@@ -406,6 +406,14 @@ enum ResponsesChatCompletionsBridge {
         return Data(events.joined().utf8)
     }
 
+    static func makeStreamEventData(named eventName: String, payload: [String: Any]) -> Data {
+        Data(streamEventString(named: eventName, payload: payload).utf8)
+    }
+
+    static func makeStreamDoneData() -> Data {
+        Data("data: [DONE]\n\n".utf8)
+    }
+
     static func extractErrorMessage(from data: Data) -> String {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1126,7 +1134,11 @@ enum ResponsesChatCompletionsBridge {
     }
 
     private static func appendStreamEvent(named eventName: String, payload: [String: Any], to events: inout [String]) {
+        events.append(streamEventString(named: eventName, payload: payload))
+    }
+
+    private static func streamEventString(named eventName: String, payload: [String: Any]) -> String {
         let payloadString = jsonString(from: payload) ?? "{}"
-        events.append("event: \(eventName)\ndata: \(payloadString)\n\n")
+        return "event: \(eventName)\ndata: \(payloadString)\n\n"
     }
 }

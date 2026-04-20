@@ -154,6 +154,10 @@ private struct NoopTerminalCommandLauncher: TerminalCommandLaunching {
     func launch(command: String) throws {}
 }
 
+private struct NoopCopilotCLIInstaller: CopilotCLIInstalling {
+    func installCLI() async throws {}
+}
+
 private struct NoopCopilotStatusRefresher: CopilotStatusRefreshing {
     func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus {
         CopilotAccountStatus(availableModels: [], currentModel: nil, quotaSnapshot: nil)
@@ -223,12 +227,37 @@ private struct NoopCopilotResponsesBridgeManager: CopilotResponsesBridgeManaging
         credential: CopilotCredential,
         model: String,
         availableModels: [String],
-        workingDirectoryURL: URL
+        workingDirectoryURL: URL,
+        configDirectoryURL: URL,
+        reasoningEffort: String
     ) async throws -> PreparedCopilotResponsesBridge {
         PreparedCopilotResponsesBridge(
             baseURL: "http://127.0.0.1:18083",
             apiKeyEnvName: "OPENAI_API_KEY",
             apiKey: "github-copilot-bridge"
+        )
+    }
+}
+
+private struct NoopCopilotManagedConfigManager: CopilotManagedConfigManaging {
+    func bootstrap(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String?,
+        reasoningEffort: String
+    ) async throws -> ManagedCopilotConfigBootstrapResult {
+        let updatedCredential = try CopilotCredential(
+            configDirectoryName: credential.configDirectoryName ?? accountID.uuidString,
+            host: credential.host,
+            login: credential.login,
+            githubAccessToken: credential.githubAccessToken,
+            accessToken: credential.accessToken,
+            defaultModel: model ?? credential.defaultModel,
+            source: credential.source
+        ).validated()
+        return ManagedCopilotConfigBootstrapResult(
+            credential: updatedCredential,
+            configDirectoryURL: CopilotCLIConfiguration.defaultConfigDirectoryURL()
         )
     }
 }
@@ -277,6 +306,7 @@ extension AppViewModel {
         jwtDecoder: JWTClaimsDecoder,
         oauthClient: any OAuthClienting,
         terminalCommandLauncher: any TerminalCommandLaunching = NoopTerminalCommandLauncher(),
+        copilotCLIInstaller: any CopilotCLIInstalling = NoopCopilotCLIInstaller(),
         openExternalURL: @escaping (URL) -> Void = { _ in },
         quotaMonitor: any QuotaMonitoring,
         userNotifier: any UserNotifying,
@@ -290,6 +320,7 @@ extension AppViewModel {
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = NoopCodexOAuthClaudeBridgeManager(),
         copilotProvider: any CopilotProviderServing = NoopCopilotProvider(),
         copilotStatusRefresher: any CopilotStatusRefreshing = NoopCopilotStatusRefresher(),
+        copilotManagedConfigManager: (any CopilotManagedConfigManaging)? = NoopCopilotManagedConfigManager(),
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = NoopCopilotResponsesBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = NoopOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = NoopClaudeProviderCodexBridgeManager(),
@@ -304,11 +335,13 @@ extension AppViewModel {
             jwtDecoder: jwtDecoder,
             oauthClient: oauthClient,
             terminalCommandLauncher: terminalCommandLauncher,
+            copilotCLIInstaller: copilotCLIInstaller,
             openExternalURL: openExternalURL,
             claudeProfileManager: NoopClaudeProfileManager(),
             claudeAPIClient: NoopClaudeAPIClient(),
             copilotProvider: copilotProvider,
             copilotStatusRefresher: copilotStatusRefresher,
+            copilotManagedConfigManager: copilotManagedConfigManager,
             quotaMonitor: quotaMonitor,
             userNotifier: userNotifier,
             runtimeInspector: runtimeInspector,

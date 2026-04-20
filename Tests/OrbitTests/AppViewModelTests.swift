@@ -1563,6 +1563,10 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.activeAccount?.id, copilotAccount.id)
         XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccount.id)
         XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.login, "aikilan")
+        XCTAssertEqual(
+            try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.configDirectoryName,
+            copilotAccount.id.uuidString
+        )
         XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.accessToken, "copilot_access_token")
         XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.source, .localImport)
     }
@@ -1626,6 +1630,10 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.activeAccount?.id, copilotAccount.id)
         XCTAssertEqual(harness.model.selectedAccount?.id, copilotAccount.id)
         XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.host, "https://github.com")
+        XCTAssertEqual(
+            try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.configDirectoryName,
+            copilotAccount.id.uuidString
+        )
         XCTAssertEqual(try harness.credentialStore.load(for: copilotAccount.id).copilotCredential?.source, .orbitOAuth)
     }
 
@@ -3431,6 +3439,183 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(harness.model.isLaunchingIsolatedInstance(for: account.id))
     }
 
+    func testConfirmCopilotCLIInstallAutomaticallyRetriesCopilotIsolatedLaunch() async throws {
+        let accountID = UUID()
+        let copilotAccountID = UUID()
+        let launcher = RecordingCodexInstanceLauncher()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .success(
+            ResolvedCodexDesktopModelSelection(
+                selectedModel: "gpt-4.1",
+                availableModels: ["gpt-4.1"]
+            )
+        )
+        resolver.desktopContextResults = [
+            .failure(CopilotACPClientError.cliUnavailable),
+        ]
+        let installer = RecordingCopilotCLIInstaller()
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential)
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: copilotAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: true
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotCLIInstaller: installer,
+            copilotProvider: copilotProvider,
+            instanceLauncher: launcher,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+
+        await harness.model.launchIsolatedCodex(for: account)
+        XCTAssertNotNil(harness.model.isolatedCodexModelSelection)
+
+        await harness.model.confirmIsolatedCodexModelSelection()
+        XCTAssertNotNil(harness.model.copilotCLIInstallPrompt)
+        XCTAssertEqual(launcher.launchCallCount, 0)
+
+        await harness.model.confirmCopilotCLIInstall()
+
+        let installCallCount = await installer.snapshot()
+        XCTAssertEqual(installCallCount, 1)
+        XCTAssertNil(harness.model.copilotCLIInstallPrompt)
+        XCTAssertNil(harness.model.isolatedCodexModelSelection)
+        XCTAssertEqual(launcher.launchCallCount, 1)
+        XCTAssertTrue(harness.model.hasLaunchedIsolatedInstance(for: account.id))
+    }
+
+    func testConfirmCopilotCLIInstallShowsErrorWhenAutomaticInstallFails() async throws {
+        let accountID = UUID()
+        let copilotAccountID = UUID()
+        let resolver = RecordingDesktopCLIEnvironmentResolver()
+        resolver.desktopModelSelectionResult = .success(
+            ResolvedCodexDesktopModelSelection(
+                selectedModel: "gpt-4.1",
+                availableModels: ["gpt-4.1"]
+            )
+        )
+        resolver.desktopContextResults = [
+            .failure(CopilotACPClientError.cliUnavailable),
+        ]
+        let installer = RecordingCopilotCLIInstaller(result: .failure(MockError.cliLaunchFailed))
+        let copilotCredential = CopilotCredential(
+            host: "https://github.com",
+            login: "aikilan",
+            accessToken: "copilot_access_token",
+            defaultModel: "gpt-4.1",
+            source: .localImport
+        )
+        let copilotProvider = RecordingCopilotProvider(
+            resolveCredentialResult: .success(copilotCredential)
+        )
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: copilotAccountID,
+            extraSeeds: [
+                AccountSeed(
+                    account: ManagedAccount(
+                        id: copilotAccountID,
+                        platform: .codex,
+                        accountIdentifier: copilotCredential.accountIdentifier,
+                        displayName: "GitHub Copilot • aikilan",
+                        email: copilotCredential.credentialSummary,
+                        authKind: .githubCopilot,
+                        providerRule: .githubCopilot,
+                        providerPresetID: nil,
+                        providerDisplayName: "GitHub Copilot",
+                        providerBaseURL: nil,
+                        providerAPIKeyEnvName: nil,
+                        defaultModel: "gpt-4.1",
+                        defaultCLITarget: .codex,
+                        createdAt: Date(),
+                        lastUsedAt: nil,
+                        lastQuotaSnapshotAt: nil,
+                        lastRefreshAt: nil,
+                        planType: nil,
+                        subscriptionDetails: nil,
+                        lastStatusCheckAt: nil,
+                        lastStatusMessage: nil,
+                        lastStatusLevel: nil,
+                        isActive: true
+                    ),
+                    payload: .copilot(copilotCredential),
+                    snapshot: nil
+                )
+            ],
+            copilotCLIInstaller: installer,
+            copilotProvider: copilotProvider,
+            cliEnvironmentResolver: resolver
+        )
+
+        await harness.model.prepare()
+        let account = try XCTUnwrap(harness.model.accounts.first(where: { $0.id == copilotAccountID }))
+
+        await harness.model.launchIsolatedCodex(for: account)
+        await harness.model.confirmIsolatedCodexModelSelection()
+        XCTAssertNotNil(harness.model.copilotCLIInstallPrompt)
+
+        await harness.model.confirmCopilotCLIInstall()
+
+        let installCallCount = await installer.snapshot()
+        XCTAssertEqual(installCallCount, 1)
+        XCTAssertNil(harness.model.copilotCLIInstallPrompt)
+        XCTAssertEqual(
+            harness.model.banner?.message,
+            L10n.tr("GitHub Copilot CLI 自动安装失败：%@", MockError.cliLaunchFailed.localizedDescription)
+        )
+        XCTAssertNotNil(harness.model.isolatedCodexModelSelection)
+    }
+
     func testCancelIsolatedCodexModelSelectionDoesNotLaunchOrPersistModel() async throws {
         let accountID = UUID()
         let cachedPayload = try makeAPIKeyPayload("sk-test-old")
@@ -3586,7 +3771,8 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(launcher.launchCallCount, 1)
         XCTAssertNil(launcher.lastPayload)
         XCTAssertEqual(launcher.lastContext?.environmentVariables["DEEPSEEK_API_KEY"], "sk-deepseek")
-        XCTAssertEqual(launcher.lastContext?.configFileContents, "desktop-config")
+        XCTAssertTrue(launcher.lastContext?.configFileContents?.contains("model = \"deepseek-chat\"") == true)
+        XCTAssertTrue(launcher.lastContext?.configFileContents?.contains("model_reasoning_effort = \"medium\"") == true)
         XCTAssertEqual(launcher.lastContext?.modelCatalogSnapshot, ResolvedCodexModelCatalogSnapshot(availableModels: ["deepseek-chat"]))
         XCTAssertTrue(authFileManager.activatedPayloads.isEmpty)
 
@@ -3994,9 +4180,11 @@ final class AppViewModelTests: XCTestCase {
         activeAccountID: UUID? = nil,
         extraSeeds: [AccountSeed] = [],
         terminalCommandLauncher: any TerminalCommandLaunching = RecordingTerminalCommandLauncher(),
+        copilotCLIInstaller: any CopilotCLIInstalling = RecordingCopilotCLIInstaller(),
         openExternalURL: @escaping (URL) -> Void = { _ in },
         copilotProvider: any CopilotProviderServing = NoopCopilotProvider(),
         copilotStatusRefresher: (any CopilotStatusRefreshing)? = nil,
+        copilotManagedConfigManager: (any CopilotManagedConfigManaging)? = NoopCopilotManagedConfigManager(),
         quotaMonitor: any QuotaMonitoring = NoopQuotaMonitor(),
         userNotifier: any UserNotifying = RecordingUserNotifier(),
         instanceLauncher: any CodexInstanceLaunching = RecordingCodexInstanceLauncher(),
@@ -4101,6 +4289,7 @@ final class AppViewModelTests: XCTestCase {
             jwtDecoder: JWTClaimsDecoder(),
             oauthClient: oauthClient,
             terminalCommandLauncher: terminalCommandLauncher,
+            copilotCLIInstaller: copilotCLIInstaller,
             openExternalURL: openExternalURL,
             quotaMonitor: quotaMonitor,
             userNotifier: userNotifier,
@@ -4114,6 +4303,7 @@ final class AppViewModelTests: XCTestCase {
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
             copilotProvider: copilotProvider,
             copilotStatusRefresher: copilotStatusRefresher ?? CopilotStatusRefresher(provider: copilotProvider),
+            copilotManagedConfigManager: copilotManagedConfigManager,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration
@@ -4289,6 +4479,36 @@ private final class RecordingTerminalCommandLauncher: @unchecked Sendable, Termi
 
     func launch(command: String) throws {
         launchedCommands.append(command)
+    }
+}
+
+private actor RecordingCopilotCLIInstallerSnapshot {
+    var installCallCount = 0
+
+    func recordInstall() {
+        installCallCount += 1
+    }
+
+    func snapshot() -> Int {
+        installCallCount
+    }
+}
+
+private final class RecordingCopilotCLIInstaller: CopilotCLIInstalling {
+    private let result: Result<Void, Error>
+    private let snapshotStore = RecordingCopilotCLIInstallerSnapshot()
+
+    init(result: Result<Void, Error> = .success(())) {
+        self.result = result
+    }
+
+    func installCLI() async throws {
+        await snapshotStore.recordInstall()
+        try result.get()
+    }
+
+    func snapshot() async -> Int {
+        await snapshotStore.snapshot()
     }
 }
 
@@ -4546,7 +4766,9 @@ private actor RecordingCopilotProvider: CopilotProviderServing {
 }
 
 private final class RecordingDesktopCLIEnvironmentResolver: @unchecked Sendable, CLIEnvironmentResolving {
+    var desktopModelSelectionResults: [Result<ResolvedCodexDesktopModelSelection, Error>] = []
     var desktopModelSelectionResult: Result<ResolvedCodexDesktopModelSelection, Error>?
+    var desktopContextResults: [Result<ResolvedCodexDesktopLaunchContext, Error>] = []
     var desktopContextResult: Result<ResolvedCodexDesktopLaunchContext, Error>?
 
     func resolveCodexDesktopModelSelection(
@@ -4555,6 +4777,9 @@ private final class RecordingDesktopCLIEnvironmentResolver: @unchecked Sendable,
         copilotCredential: CopilotCredential?,
         copilotStatus: CopilotAccountStatus?
     ) async throws -> ResolvedCodexDesktopModelSelection {
+        if !desktopModelSelectionResults.isEmpty {
+            return try desktopModelSelectionResults.removeFirst().get()
+        }
         if let desktopModelSelectionResult {
             return try desktopModelSelectionResult.get()
         }
@@ -4590,6 +4815,9 @@ private final class RecordingDesktopCLIEnvironmentResolver: @unchecked Sendable,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging,
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     ) async throws -> ResolvedCodexDesktopLaunchContext {
+        if !desktopContextResults.isEmpty {
+            return try desktopContextResults.removeFirst().get()
+        }
         if let desktopContextResult {
             return try desktopContextResult.get()
         }
@@ -4887,6 +5115,29 @@ private actor RecordingClaudeProviderCodexBridgeManager: ClaudeProviderCodexBrid
             lastAPIKey: lastAPIKey,
             lastModel: lastModel,
             lastAvailableModels: lastAvailableModels
+        )
+    }
+}
+
+private struct NoopCopilotManagedConfigManager: CopilotManagedConfigManaging {
+    func bootstrap(
+        accountID: UUID,
+        credential: CopilotCredential,
+        model: String?,
+        reasoningEffort: String
+    ) async throws -> ManagedCopilotConfigBootstrapResult {
+        let updatedCredential = try CopilotCredential(
+            configDirectoryName: credential.configDirectoryName ?? accountID.uuidString,
+            host: credential.host,
+            login: credential.login,
+            githubAccessToken: credential.githubAccessToken,
+            accessToken: credential.accessToken,
+            defaultModel: model ?? credential.defaultModel,
+            source: credential.source
+        ).validated()
+        return ManagedCopilotConfigBootstrapResult(
+            credential: updatedCredential,
+            configDirectoryURL: CopilotCLIConfiguration.defaultConfigDirectoryURL()
         )
     }
 }
