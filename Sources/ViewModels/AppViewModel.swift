@@ -158,6 +158,10 @@ final class AppViewModel: ObservableObject {
     @Published var isolatedCodexModelSelection: IsolatedCodexModelSelectionState?
     @Published var isolatedCodexModelSelectionError: String?
     @Published var copilotCLIInstallPrompt: CopilotCLIInstallPromptState?
+    @Published private(set) var copilotSessionImportCandidates: [CopilotSessionCandidate] = []
+    @Published private(set) var copilotSessionImportError: String?
+    @Published private(set) var isImportingCopilotSession = false
+    @Published private(set) var executingCopilotSessionQueueItemID: UUID?
 
     let paths: AppPaths
     let sessionLogger: AppSessionLogger?
@@ -187,10 +191,12 @@ final class AppViewModel: ObservableObject {
     private let appSupportPathRepairer: any AppSupportPathRepairing
     private let codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
     private let copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging
+    private let copilotSessionImporter: any CopilotSessionQueueImporting
     private let openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging
     private let claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
     private let runtimes: [PlatformKind: any PlatformRuntime]
     private let bannerAutoDismissDuration: Duration
+    private var copilotSessionMonitorTask: Task<Void, Never>?
     private var browserSession: BrowserOAuthSession?
     private var browserWaitTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
@@ -229,6 +235,7 @@ final class AppViewModel: ObservableObject {
         appSupportPathRepairer: any AppSupportPathRepairing = AppSupportPathRepairer(),
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = CodexOAuthClaudeBridgeManager(),
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
+        copilotSessionImporter: (any CopilotSessionQueueImporting)? = nil,
         copilotACPDebugStore: CopilotACPDebugStore = CopilotACPDebugStore(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = OpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = ClaudeProviderCodexBridgeManager(),
@@ -266,10 +273,16 @@ final class AppViewModel: ObservableObject {
         self.appSupportPathRepairer = appSupportPathRepairer
         self.codexOAuthClaudeBridgeManager = codexOAuthClaudeBridgeManager
         self.copilotResponsesBridgeManager = copilotResponsesBridgeManager
+        self.copilotSessionImporter = copilotSessionImporter
+            ?? CopilotSessionQueueImporter(appSupportDirectoryURL: paths.appSupportDirectoryURL)
         self.openAICompatibleProviderCodexBridgeManager = openAICompatibleProviderCodexBridgeManager
         self.claudeProviderCodexBridgeManager = claudeProviderCodexBridgeManager
         self.runtimes = Dictionary(uniqueKeysWithValues: platformRuntimes.map { ($0.platform, $0) })
         self.bannerAutoDismissDuration = bannerAutoDismissDuration
+    }
+
+    deinit {
+        copilotSessionMonitorTask?.cancel()
     }
 
     static func live(sessionLogger: AppSessionLogger? = nil) -> AppViewModel {
@@ -357,6 +370,19 @@ final class AppViewModel: ObservableObject {
         database.accounts
     }
 
+    var copilotSessionQueueItems: [CopilotSessionQueueItem] {
+        database.copilotSessionQueueItems.sorted {
+            if $0.status == $1.status {
+                return $0.importedAt > $1.importedAt
+            }
+            return statusSortIndex($0.status) < statusSortIndex($1.status)
+        }
+    }
+
+    var isCopilotSessionAutoMonitorEnabled: Bool {
+        database.copilotSessionSyncSettings.isAutoMonitorEnabled
+    }
+
     var activeAccount: ManagedAccount? {
         database.account(id: database.activeAccountID)
     }
@@ -404,6 +430,17 @@ final class AppViewModel: ObservableObject {
     var focusedPlatformUnsupportedMessage: String {
         guard let focusedPlatform else { return "" }
         return unsupportedMessage(for: focusedPlatform)
+    }
+
+    private func statusSortIndex(_ status: CopilotSessionQueueItemStatus) -> Int {
+        switch status {
+        case .pending:
+            return 0
+        case .sent:
+            return 1
+        case .archived:
+            return 2
+        }
     }
 
     var isEditingProviderAccount: Bool {
@@ -779,6 +816,7 @@ final class AppViewModel: ObservableObject {
 
         await importCurrentAuthIfNeeded()
         startQuotaMonitor()
+        startCopilotSessionMonitorIfNeeded()
         evaluateLowQuotaSwitchRecommendation()
         await refreshCodexDesktopRunningState()
         sessionLogger?.info("prepare.complete")
@@ -944,6 +982,282 @@ final class AppViewModel: ObservableObject {
 
     func openCodexCLI(for account: ManagedAccount, workingDirectoryURL: URL) async {
         await openCLI(for: account, target: .codex, workingDirectoryURL: workingDirectoryURL)
+    }
+
+    func loadCopilotSessionCandidates(for workspaceURL: URL) async {
+        copilotSessionImportError = nil
+        do {
+            copilotSessionImportCandidates = try copilotSessionImporter.sessions(for: workspaceURL)
+        } catch {
+            copilotSessionImportCandidates = []
+            copilotSessionImportError = error.localizedDescription
+            pushBanner(level: .error, message: L10n.tr("读取 Copilot Session 失败：%@", error.localizedDescription))
+        }
+    }
+
+    func importCopilotSession(_ candidate: CopilotSessionCandidate) async {
+        guard !isImportingCopilotSession else { return }
+        isImportingCopilotSession = true
+        copilotSessionImportError = nil
+        defer { isImportingCopilotSession = false }
+
+        do {
+            let item = try copilotSessionImporter.importSession(candidate)
+            let replacedItem = database.upsertCopilotSessionQueueItem(item)
+            removeCopilotSessionHandoffDirectoryIfNeeded(for: replacedItem, preserving: item)
+            try await persistDatabase()
+            pushBanner(level: .info, message: L10n.tr("已导入 Copilot Session：%@", item.title))
+        } catch {
+            copilotSessionImportError = error.localizedDescription
+            pushBanner(level: .error, message: L10n.tr("导入 Copilot Session 失败：%@", error.localizedDescription))
+        }
+    }
+
+    func archiveCopilotSessionQueueItem(_ id: UUID) {
+        database.archiveCopilotSessionQueueItem(id: id)
+        Task {
+            try? await persistDatabase()
+        }
+    }
+
+    func deleteCopilotSessionQueueItem(_ id: UUID) {
+        let item = database.copilotSessionQueueItems.first { $0.id == id }
+        database.removeCopilotSessionQueueItem(id: id)
+        removeCopilotSessionHandoffDirectoryIfNeeded(for: item)
+        Task {
+            try? await persistDatabase()
+        }
+    }
+
+    func setCopilotSessionAutoMonitorEnabled(_ isEnabled: Bool) {
+        database.setCopilotSessionAutoMonitorEnabled(isEnabled)
+        startCopilotSessionMonitorIfNeeded()
+        Task {
+            try? await persistDatabase()
+        }
+    }
+
+    func pollCopilotSessionMonitorOnce() async {
+        guard database.copilotSessionSyncSettings.isAutoMonitorEnabled else { return }
+        let monitoredPaths = database.copilotSessionSyncSettings.monitoredWorkspacePaths
+        guard !monitoredPaths.isEmpty else { return }
+
+        var didImport = false
+        for workspacePath in monitoredPaths {
+            do {
+                let candidates = try copilotSessionImporter.sessions(
+                    for: URL(fileURLWithPath: workspacePath, isDirectory: true)
+                )
+                for candidate in candidates where !hasCopilotSessionQueueItem(for: candidate) {
+                    let item = try copilotSessionImporter.importSession(candidate)
+                    database.upsertCopilotSessionQueueItem(item)
+                    didImport = true
+                }
+            } catch {
+                database.appendLog(level: .warning, message: L10n.tr("自动监听 Copilot Session 失败：%@", error.localizedDescription))
+            }
+        }
+
+        if didImport {
+            try? await persistDatabase()
+        }
+    }
+
+    func executeCopilotSessionQueueItemInCLI(_ item: CopilotSessionQueueItem) async {
+        guard executingCopilotSessionQueueItemID == nil else { return }
+        guard let account = selectedAccount, account.supportsCodexCLI else {
+            pushBanner(level: .error, message: L10n.tr("当前选中账号不支持 Codex CLI。"))
+            return
+        }
+
+        executingCopilotSessionQueueItemID = item.id
+        defer {
+            if executingCopilotSessionQueueItemID == item.id {
+                executingCopilotSessionQueueItemID = nil
+            }
+        }
+
+        do {
+            let workspaceURL = URL(fileURLWithPath: item.workspacePath, isDirectory: true)
+            let context = try await resolveCodexLaunchContext(for: account, workingDirectoryURL: workspaceURL)
+            try codexCLILauncher.launchCLI(
+                context: context,
+                initialPrompt: copilotSessionHandoffPrompt(for: item),
+                additionalDirectoryURL: URL(fileURLWithPath: item.handoffDirectoryPath, isDirectory: true)
+            )
+            database.markCopilotSessionQueueItemSent(id: item.id, target: .cli)
+            database.rememberCLILaunch(workspaceURL, target: .codex, for: account.id)
+            try await persistDatabase()
+            pushBanner(level: .info, message: L10n.tr("已把 Copilot Session 发送给 Codex CLI。"))
+        } catch {
+            if requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self, itemID = item.id] in
+                guard let self, let latestItem = self.database.copilotSessionQueueItems.first(where: { $0.id == itemID }) else { return }
+                await self.executeCopilotSessionQueueItemInCLI(latestItem)
+            }) {
+                return
+            }
+            pushBanner(level: .error, message: L10n.tr("发送 Copilot Session 到 Codex CLI 失败：%@", error.localizedDescription))
+        }
+    }
+
+    func executeCopilotSessionQueueItemInDesktop(_ item: CopilotSessionQueueItem) async {
+        guard executingCopilotSessionQueueItemID == nil else { return }
+        guard let account = selectedAccount, account.supportsCodexCLI else {
+            pushBanner(level: .error, message: L10n.tr("当前选中账号不支持 Codex。"))
+            return
+        }
+        guard let deeplinkURL = copilotSessionDeeplinkURL(for: item) else {
+            pushBanner(level: .error, message: L10n.tr("生成 Codex.app deeplink 失败。"))
+            return
+        }
+
+        executingCopilotSessionQueueItemID = item.id
+        defer {
+            if executingCopilotSessionQueueItemID == item.id {
+                executingCopilotSessionQueueItemID = nil
+            }
+        }
+
+        do {
+            if account.providerRule == .chatgptOAuth, account.isActive {
+                openExternalURL(deeplinkURL)
+            } else {
+                guard canLaunchIsolatedCodex(for: account) else {
+                    throw CLIEnvironmentResolverError.codexCLINotSupported
+                }
+                let context = try await resolveCodexDesktopLaunchContext(for: account)
+                let onTermination = beginTrackingIsolatedInstance(for: account.id)
+                _ = try instanceLauncher.launchIsolatedInstance(
+                    context: context,
+                    deeplinkURL: deeplinkURL,
+                    onTermination: onTermination
+                )
+            }
+            database.markCopilotSessionQueueItemSent(id: item.id, target: .desktop)
+            try await persistDatabase()
+            pushBanner(level: .info, message: L10n.tr("已把 Copilot Session 发送给 Codex.app。"))
+        } catch {
+            stopTrackingIsolatedInstance(for: account.id)
+            if requestCopilotCLIInstallIfUnavailable(error, retry: { [weak self, itemID = item.id] in
+                guard let self, let latestItem = self.database.copilotSessionQueueItems.first(where: { $0.id == itemID }) else { return }
+                await self.executeCopilotSessionQueueItemInDesktop(latestItem)
+            }) {
+                return
+            }
+            pushBanner(level: .error, message: L10n.tr("发送 Copilot Session 到 Codex.app 失败：%@", error.localizedDescription))
+        }
+    }
+
+    func canSendCopilotSessionQueueItemToDesktop(for account: ManagedAccount) -> Bool {
+        if account.providerRule == .chatgptOAuth, account.isActive {
+            return true
+        }
+        return canLaunchIsolatedCodex(for: account)
+    }
+
+    private func startCopilotSessionMonitorIfNeeded() {
+        copilotSessionMonitorTask?.cancel()
+        copilotSessionMonitorTask = nil
+
+        guard database.copilotSessionSyncSettings.isAutoMonitorEnabled else {
+            return
+        }
+
+        copilotSessionMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollCopilotSessionMonitorOnce()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    private func hasCopilotSessionQueueItem(for candidate: CopilotSessionCandidate) -> Bool {
+        database.copilotSessionQueueItems.contains {
+            $0.workspacePath == candidate.workspacePath
+                && $0.sessionID == candidate.sessionID
+                && $0.lastMessageAt == candidate.lastMessageAt
+        }
+    }
+
+    private func removeCopilotSessionHandoffDirectoryIfNeeded(
+        for item: CopilotSessionQueueItem?,
+        preserving currentItem: CopilotSessionQueueItem? = nil
+    ) {
+        guard let item else { return }
+        if let currentItem, currentItem.handoffDirectoryPath == item.handoffDirectoryPath {
+            return
+        }
+
+        let queueRootURL = paths.appSupportDirectoryURL
+            .appendingPathComponent("copilot-session-queue", isDirectory: true)
+            .standardizedFileURL
+        let directoryURL = URL(fileURLWithPath: item.handoffDirectoryPath, isDirectory: true).standardizedFileURL
+        guard directoryURL.path.hasPrefix(queueRootURL.path + "/") else { return }
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
+
+        do {
+            try FileManager.default.removeItem(at: directoryURL)
+        } catch {
+            database.appendLog(
+                level: .warning,
+                message: L10n.tr("清理 Copilot Session handoff 目录失败：%@", error.localizedDescription)
+            )
+        }
+    }
+
+    private func copilotSessionHandoffPrompt(for item: CopilotSessionQueueItem) -> String {
+        """
+        请接手这个从 VSCode Copilot Chat 导入的同目录任务。
+
+        Workspace: \(item.workspacePath)
+        Handoff: \(item.handoffFilePath)
+
+        请先完整阅读 handoff.md 里的原始 session JSONL、编辑状态和解析后的对话，再基于上下文继续完成任务。
+        """
+    }
+
+    private func copilotSessionDeeplinkURL(for item: CopilotSessionQueueItem) -> URL? {
+        var components = URLComponents()
+        components.scheme = "codex"
+        components.host = "new"
+        components.queryItems = [
+            URLQueryItem(name: "path", value: item.workspacePath),
+            URLQueryItem(name: "prompt", value: copilotSessionHandoffPrompt(for: item)),
+            URLQueryItem(name: "originUrl", value: "orbit://copilot-session/\(item.id.uuidString)"),
+        ]
+        return components.url
+    }
+
+    private func resolveCodexDesktopLaunchContext(for account: ManagedAccount) async throws -> ResolvedCodexDesktopLaunchContext {
+        var payload: CodexAuthPayload?
+        var providerCredential: ProviderAPIKeyCredential?
+        var copilotCredential: CopilotCredential?
+        var copilotStatus: CopilotAccountStatus?
+
+        switch account.providerRule {
+        case .chatgptOAuth:
+            payload = try await latestPayloadForSwitch(for: account)
+        case .openAICompatible:
+            providerCredential = try latestCredential(for: account).providerAPIKeyCredential
+        case .githubCopilot:
+            let launchState = try await resolvedCopilotLaunchState(for: account)
+            copilotCredential = launchState.credential
+            copilotStatus = launchState.status
+        case .claudeCompatible, .claudeProfile:
+            throw CLIEnvironmentResolverError.codexCLINotSupported
+        }
+
+        return try await cliEnvironmentResolver.resolveCodexDesktopContext(
+            for: account,
+            appPaths: paths,
+            authPayload: payload,
+            providerAPIKeyCredential: providerCredential,
+            copilotCredential: copilotCredential,
+            copilotStatus: copilotStatus,
+            copilotResponsesBridgeManager: copilotResponsesBridgeManager,
+            openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
+            claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager
+        )
     }
 
     func launchIsolatedCodex(for account: ManagedAccount) async {

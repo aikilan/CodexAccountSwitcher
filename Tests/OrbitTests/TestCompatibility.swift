@@ -322,6 +322,7 @@ extension AppViewModel {
         copilotStatusRefresher: any CopilotStatusRefreshing = NoopCopilotStatusRefresher(),
         copilotManagedConfigManager: (any CopilotManagedConfigManaging)? = NoopCopilotManagedConfigManager(),
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging = NoopCopilotResponsesBridgeManager(),
+        copilotSessionImporter: (any CopilotSessionQueueImporting)? = nil,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = NoopOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = NoopClaudeProviderCodexBridgeManager(),
         bannerAutoDismissDuration: Duration = .seconds(10)
@@ -353,6 +354,7 @@ extension AppViewModel {
             appSupportPathRepairer: appSupportPathRepairer,
             codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
             copilotResponsesBridgeManager: copilotResponsesBridgeManager,
+            copilotSessionImporter: copilotSessionImporter,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration

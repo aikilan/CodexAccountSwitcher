@@ -42,6 +42,48 @@ final class CodexCLILauncherTests: XCTestCase {
         )
     }
 
+    func testLaunchCLIAddsHandoffDirectoryAndInitialPrompt() throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+        var capturedLines: [String] = []
+        let launcher = CodexCLILauncher(
+            fileManager: fileManager,
+            runAppleScript: { lines in
+                capturedLines = lines
+            }
+        )
+        let workingDirectoryURL = rootURL.appendingPathComponent("workspace", isDirectory: true)
+        let handoffDirectoryURL = rootURL.appendingPathComponent("handoff", isDirectory: true)
+
+        try launcher.launchCLI(
+            context: ResolvedCodexCLILaunchContext(
+                accountID: UUID(),
+                workingDirectoryURL: workingDirectoryURL,
+                mode: .globalCurrentAuth,
+                codexHomeURL: nil,
+                authPayload: nil,
+                modelCatalogSnapshot: nil,
+                configFileContents: nil,
+                environmentVariables: [:],
+                arguments: []
+            ),
+            initialPrompt: "请读取 handoff.md",
+            additionalDirectoryURL: handoffDirectoryURL
+        )
+
+        XCTAssertEqual(
+            capturedLines,
+            [
+                "tell application \"Terminal\"",
+                "activate",
+                "do script \"cd \\\"\(workingDirectoryURL.path)\\\" && codex \\\"--add-dir\\\" \\\"\(handoffDirectoryURL.path)\\\" \\\"请读取 handoff.md\\\"\"",
+                "end tell",
+            ]
+        )
+    }
+
     func testLaunchCLIIsolatedModeWritesAuthAndRunsWithIsolatedCodexHome() throws {
         let fileManager = FileManager.default
         let rootURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

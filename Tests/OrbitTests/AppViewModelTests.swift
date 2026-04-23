@@ -4512,6 +4512,243 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.cliWorkingDirectories(for: account.id), [firstDirectoryURL.path])
     }
 
+    func testCopilotSessionManualImportAddsQueueAndMonitoredWorkspace() async throws {
+        let accountID = UUID()
+        let payload = makePayload(accountID: "acct_copilot_queue_import", refreshToken: "refresh_copilot_queue_import")
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = payload
+        let workspaceURL = makeWorkingDirectoryURL("next-erp-h5-import")
+        let candidate = makeCopilotSessionCandidate(sessionID: "session-import", workspaceURL: workspaceURL)
+        let item = makeCopilotSessionQueueItem(from: candidate)
+        let importer = RecordingCopilotSessionImporter(
+            candidatesByWorkspacePath: [workspaceURL.standardizedFileURL.path: [candidate]],
+            importedItemsByCandidateID: [candidate.id: item]
+        )
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: payload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            copilotSessionImporter: importer
+        )
+
+        await harness.model.prepare()
+        await harness.model.loadCopilotSessionCandidates(for: workspaceURL)
+        await harness.model.importCopilotSession(candidate)
+
+        XCTAssertEqual(harness.model.copilotSessionImportCandidates, [candidate])
+        XCTAssertEqual(harness.model.database.copilotSessionQueueItems.map(\.id), [item.id])
+        XCTAssertEqual(
+            harness.model.database.copilotSessionSyncSettings.monitoredWorkspacePaths,
+            [workspaceURL.standardizedFileURL.path]
+        )
+    }
+
+    func testCopilotSessionMonitorOnlyImportsNewSessionsFromKnownDirectories() async throws {
+        let accountID = UUID()
+        let payload = makePayload(accountID: "acct_copilot_queue_monitor", refreshToken: "refresh_copilot_queue_monitor")
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = payload
+        let workspaceURL = makeWorkingDirectoryURL("next-erp-h5-monitor")
+        let existingCandidate = makeCopilotSessionCandidate(
+            sessionID: "session-existing",
+            workspaceURL: workspaceURL,
+            lastMessageAt: Date(timeIntervalSince1970: 1_710_000_000)
+        )
+        let newCandidate = makeCopilotSessionCandidate(
+            sessionID: "session-new",
+            workspaceURL: workspaceURL,
+            lastMessageAt: Date(timeIntervalSince1970: 1_710_000_100)
+        )
+        let existingItem = makeCopilotSessionQueueItem(from: existingCandidate)
+        let newItem = makeCopilotSessionQueueItem(from: newCandidate)
+        let importer = RecordingCopilotSessionImporter(
+            candidatesByWorkspacePath: [workspaceURL.standardizedFileURL.path: [existingCandidate]],
+            importedItemsByCandidateID: [
+                existingCandidate.id: existingItem,
+                newCandidate.id: newItem,
+            ]
+        )
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: payload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            copilotSessionImporter: importer
+        )
+
+        await harness.model.prepare()
+        await harness.model.loadCopilotSessionCandidates(for: workspaceURL)
+        await harness.model.importCopilotSession(existingCandidate)
+
+        importer.candidatesByWorkspacePath[workspaceURL.standardizedFileURL.path] = [existingCandidate, newCandidate]
+        harness.model.setCopilotSessionAutoMonitorEnabled(true)
+        await harness.model.pollCopilotSessionMonitorOnce()
+
+        XCTAssertEqual(
+            Set(harness.model.database.copilotSessionQueueItems.map(\.sessionID)),
+            ["session-existing", "session-new"]
+        )
+        XCTAssertTrue(importer.sessionRequestWorkspacePaths.allSatisfy { $0 == workspaceURL.standardizedFileURL.path })
+    }
+
+    func testExecuteCopilotSessionQueueItemInCLIUsesSelectedAccountAndMarksSent() async throws {
+        let accountID = UUID()
+        let payload = makePayload(accountID: "acct_copilot_queue_cli", refreshToken: "refresh_copilot_queue_cli")
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = payload
+        let workspaceURL = makeWorkingDirectoryURL("next-erp-h5-cli")
+        let candidate = makeCopilotSessionCandidate(sessionID: "session-cli", workspaceURL: workspaceURL)
+        let item = makeCopilotSessionQueueItem(from: candidate)
+        let importer = RecordingCopilotSessionImporter(
+            candidatesByWorkspacePath: [workspaceURL.standardizedFileURL.path: [candidate]],
+            importedItemsByCandidateID: [candidate.id: item]
+        )
+        let cliLauncher = RecordingCodexCLILauncher()
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: payload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            cliLauncher: cliLauncher,
+            copilotSessionImporter: importer
+        )
+
+        await harness.model.prepare()
+        await harness.model.loadCopilotSessionCandidates(for: workspaceURL)
+        await harness.model.importCopilotSession(candidate)
+        let queuedItem = try XCTUnwrap(harness.model.database.copilotSessionQueueItems.first)
+
+        await harness.model.executeCopilotSessionQueueItemInCLI(queuedItem)
+
+        XCTAssertEqual(cliLauncher.launchCallCount, 1)
+        XCTAssertEqual(cliLauncher.lastContext?.accountID, accountID)
+        XCTAssertEqual(cliLauncher.lastContext?.workingDirectoryURL.standardizedFileURL.path, workspaceURL.standardizedFileURL.path)
+        XCTAssertTrue(cliLauncher.lastContext?.arguments.contains("--add-dir") == true)
+        XCTAssertTrue(cliLauncher.lastContext?.arguments.contains(item.handoffDirectoryPath) == true)
+        XCTAssertTrue(cliLauncher.lastContext?.arguments.last?.contains(item.handoffFilePath) == true)
+        XCTAssertEqual(harness.model.database.copilotSessionQueueItems.first?.status, .sent)
+        XCTAssertEqual(harness.model.database.copilotSessionQueueItems.first?.lastExecutionTarget, .cli)
+    }
+
+    func testDeleteCopilotSessionQueueItemRemovesHandoffDirectory() async throws {
+        let accountID = UUID()
+        let payload = makePayload(accountID: "acct_copilot_queue_delete", refreshToken: "refresh_copilot_queue_delete")
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = payload
+        let workspaceURL = makeWorkingDirectoryURL("next-erp-h5-delete")
+        let candidate = makeCopilotSessionCandidate(sessionID: "session-delete", workspaceURL: workspaceURL)
+        let importer = RecordingCopilotSessionImporter(candidatesByWorkspacePath: [:], importedItemsByCandidateID: [:])
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: payload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            copilotSessionImporter: importer
+        )
+        let fileManager = FileManager.default
+        let handoffDirectoryURL = harness.model.paths.appSupportDirectoryURL
+            .appendingPathComponent("copilot-session-queue", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: handoffDirectoryURL, withIntermediateDirectories: true)
+        try "handoff".write(to: handoffDirectoryURL.appendingPathComponent("handoff.md"), atomically: true, encoding: .utf8)
+        let item = makeCopilotSessionQueueItem(from: candidate, handoffDirectoryURL: handoffDirectoryURL)
+        importer.candidatesByWorkspacePath[workspaceURL.standardizedFileURL.path] = [candidate]
+        importer.importedItemsByCandidateID[candidate.id] = item
+
+        await harness.model.prepare()
+        await harness.model.loadCopilotSessionCandidates(for: workspaceURL)
+        await harness.model.importCopilotSession(candidate)
+        harness.model.deleteCopilotSessionQueueItem(item.id)
+
+        XCTAssertTrue(harness.model.database.copilotSessionQueueItems.isEmpty)
+        XCTAssertFalse(fileManager.fileExists(atPath: handoffDirectoryURL.path))
+    }
+
+    func testReimportingCopilotSessionRemovesReplacedHandoffDirectory() async throws {
+        let accountID = UUID()
+        let payload = makePayload(accountID: "acct_copilot_queue_reimport", refreshToken: "refresh_copilot_queue_reimport")
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = payload
+        let workspaceURL = makeWorkingDirectoryURL("next-erp-h5-reimport")
+        let candidate = makeCopilotSessionCandidate(sessionID: "session-reimport", workspaceURL: workspaceURL)
+        let importer = RecordingCopilotSessionImporter(candidatesByWorkspacePath: [:], importedItemsByCandidateID: [:])
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: payload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID,
+            copilotSessionImporter: importer
+        )
+        let fileManager = FileManager.default
+        let queueRootURL = harness.model.paths.appSupportDirectoryURL
+            .appendingPathComponent("copilot-session-queue", isDirectory: true)
+        let oldDirectoryURL = queueRootURL.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let newDirectoryURL = queueRootURL.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: oldDirectoryURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: newDirectoryURL, withIntermediateDirectories: true)
+        try "old".write(to: oldDirectoryURL.appendingPathComponent("handoff.md"), atomically: true, encoding: .utf8)
+        try "new".write(to: newDirectoryURL.appendingPathComponent("handoff.md"), atomically: true, encoding: .utf8)
+        let oldItem = makeCopilotSessionQueueItem(from: candidate, handoffDirectoryURL: oldDirectoryURL)
+        let newItem = makeCopilotSessionQueueItem(from: candidate, handoffDirectoryURL: newDirectoryURL)
+        importer.candidatesByWorkspacePath[workspaceURL.standardizedFileURL.path] = [candidate]
+        importer.importedItemsByCandidateID[candidate.id] = oldItem
+
+        await harness.model.prepare()
+        await harness.model.loadCopilotSessionCandidates(for: workspaceURL)
+        await harness.model.importCopilotSession(candidate)
+        importer.importedItemsByCandidateID[candidate.id] = newItem
+        await harness.model.importCopilotSession(candidate)
+
+        XCTAssertEqual(harness.model.database.copilotSessionQueueItems.map(\.id), [newItem.id])
+        XCTAssertFalse(fileManager.fileExists(atPath: oldDirectoryURL.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: newDirectoryURL.path))
+    }
+
+    func testCopilotSessionDesktopAvailabilityRejectsClaudeCompatibleAccount() async throws {
+        let accountID = UUID()
+        let payload = makePayload(accountID: "acct_copilot_queue_desktop", refreshToken: "refresh_copilot_queue_desktop")
+        let authFileManager = RecordingAuthFileManager()
+        authFileManager.currentAuth = payload
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: payload,
+            authFileManager: authFileManager,
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .verified),
+            activeAccountID: accountID
+        )
+        let claudeAccount = makeProviderAccount(
+            id: UUID(),
+            platform: .codex,
+            identifier: "claude-compatible",
+            displayName: "Claude Compatible",
+            email: "sk-claude",
+            rule: .claudeCompatible,
+            presetID: "anthropic",
+            baseURL: "https://api.anthropic.com/v1",
+            envName: "ANTHROPIC_API_KEY",
+            model: "claude-sonnet-4-5"
+        )
+
+        await harness.model.prepare()
+        let activeAccount = try XCTUnwrap(harness.model.selectedAccount)
+
+        XCTAssertTrue(claudeAccount.supportsCodexCLI)
+        XCTAssertFalse(harness.model.canSendCopilotSessionQueueItemToDesktop(for: claudeAccount))
+        XCTAssertTrue(harness.model.canSendCopilotSessionQueueItemToDesktop(for: activeAccount))
+    }
+
     private func makeHarness(
         accountID: UUID,
         cachedPayload: CodexAuthPayload,
@@ -4537,6 +4774,7 @@ final class AppViewModelTests: XCTestCase {
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = RecordingCodexOAuthClaudeBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = RecordingOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = RecordingClaudeProviderCodexBridgeManager(),
+        copilotSessionImporter: (any CopilotSessionQueueImporting)? = nil,
         bannerAutoDismissDuration: Duration = .seconds(10),
         enableSessionLogger: Bool = false
     ) async throws -> AppViewModelHarness {
@@ -4645,6 +4883,7 @@ final class AppViewModelTests: XCTestCase {
             copilotProvider: copilotProvider,
             copilotStatusRefresher: copilotStatusRefresher ?? CopilotStatusRefresher(provider: copilotProvider),
             copilotManagedConfigManager: copilotManagedConfigManager,
+            copilotSessionImporter: copilotSessionImporter,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration
@@ -4724,6 +4963,49 @@ final class AppViewModelTests: XCTestCase {
 
     private func makeWorkingDirectoryURL(_ name: String) -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+    }
+
+    private func makeCopilotSessionCandidate(
+        sessionID: String,
+        workspaceURL: URL,
+        lastMessageAt: Date = Date(timeIntervalSince1970: 1_710_000_000)
+    ) -> CopilotSessionCandidate {
+        CopilotSessionCandidate(
+            workspacePath: workspaceURL.standardizedFileURL.path,
+            workspaceStorageID: "storage-\(sessionID)",
+            workspaceStoragePath: workspaceURL.appendingPathComponent(".vscode-storage", isDirectory: true).path,
+            sessionID: sessionID,
+            title: "Session \(sessionID)",
+            createdAt: lastMessageAt.addingTimeInterval(-60),
+            lastMessageAt: lastMessageAt,
+            modelID: "gpt-4.1",
+            hasPendingEdits: false,
+            lastResponseState: "complete"
+        )
+    }
+
+    private func makeCopilotSessionQueueItem(
+        from candidate: CopilotSessionCandidate,
+        handoffDirectoryURL: URL? = nil
+    ) -> CopilotSessionQueueItem {
+        let handoffDirectoryPath = handoffDirectoryURL?.path ?? candidate.workspacePath + "/.handoff-\(candidate.sessionID)"
+        return CopilotSessionQueueItem(
+            id: UUID(),
+            workspacePath: candidate.workspacePath,
+            workspaceStorageID: candidate.workspaceStorageID,
+            sessionID: candidate.sessionID,
+            title: candidate.title,
+            createdAt: candidate.createdAt,
+            lastMessageAt: candidate.lastMessageAt,
+            importedAt: Date(),
+            status: .pending,
+            handoffDirectoryPath: handoffDirectoryPath,
+            handoffFilePath: handoffDirectoryPath + "/handoff.md",
+            rawSessionFilePath: handoffDirectoryPath + "/\(candidate.sessionID).jsonl",
+            editingStateFilePath: nil,
+            lastSentAt: nil,
+            lastExecutionTarget: nil
+        )
     }
 
     private func readSessionLog(from harness: AppViewModelHarness) throws -> String {
@@ -5227,6 +5509,7 @@ private final class RecordingCodexInstanceLauncher: CodexInstanceLaunching {
     var lastAccountID: UUID?
     var lastPayload: CodexAuthPayload?
     var lastContext: ResolvedCodexDesktopLaunchContext?
+    var lastDeeplinkURL: URL?
     var lastAppSupportDirectoryURL: URL?
     private var terminationHandlers: [UUID: @Sendable () -> Void] = [:]
 
@@ -5256,6 +5539,7 @@ private final class RecordingCodexInstanceLauncher: CodexInstanceLaunching {
         lastAccountID = context.accountID
         lastPayload = context.authPayload
         lastContext = context
+        lastDeeplinkURL = nil
         terminationHandlers[context.accountID] = onTermination
         let rootDirectoryURL = context.codexHomeURL.deletingLastPathComponent()
         return IsolatedCodexLaunchPaths(
@@ -5265,9 +5549,48 @@ private final class RecordingCodexInstanceLauncher: CodexInstanceLaunching {
         )
     }
 
+    func launchIsolatedInstance(
+        context: ResolvedCodexDesktopLaunchContext,
+        deeplinkURL: URL?,
+        onTermination: @escaping @Sendable () -> Void
+    ) throws -> IsolatedCodexLaunchPaths {
+        let paths = try launchIsolatedInstance(context: context, onTermination: onTermination)
+        lastDeeplinkURL = deeplinkURL
+        return paths
+    }
+
     func simulateTermination(for accountID: UUID) {
         let handler = terminationHandlers.removeValue(forKey: accountID)
         handler?()
+    }
+}
+
+private final class RecordingCopilotSessionImporter: @unchecked Sendable, CopilotSessionQueueImporting {
+    var candidatesByWorkspacePath: [String: [CopilotSessionCandidate]]
+    var importedItemsByCandidateID: [String: CopilotSessionQueueItem]
+    private(set) var sessionRequestWorkspacePaths: [String] = []
+    private(set) var importedCandidateIDs: [String] = []
+
+    init(
+        candidatesByWorkspacePath: [String: [CopilotSessionCandidate]],
+        importedItemsByCandidateID: [String: CopilotSessionQueueItem]
+    ) {
+        self.candidatesByWorkspacePath = candidatesByWorkspacePath
+        self.importedItemsByCandidateID = importedItemsByCandidateID
+    }
+
+    func sessions(for workspaceURL: URL) throws -> [CopilotSessionCandidate] {
+        let path = workspaceURL.standardizedFileURL.path
+        sessionRequestWorkspacePaths.append(path)
+        return candidatesByWorkspacePath[path] ?? []
+    }
+
+    func importSession(_ candidate: CopilotSessionCandidate) throws -> CopilotSessionQueueItem {
+        importedCandidateIDs.append(candidate.id)
+        guard let item = importedItemsByCandidateID[candidate.id] else {
+            throw MockError.unused
+        }
+        return item
     }
 }
 

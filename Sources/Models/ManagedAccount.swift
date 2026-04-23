@@ -349,9 +349,11 @@ struct AppDatabase: Codable, Sendable {
     var copilotQuotaSnapshots: [String: CopilotQuotaSnapshot] = [:]
     var switchLogs: [SwitchLogEntry]
     var cliLaunchHistoryByAccountID: [String: [CLILaunchRecord]] = [:]
+    var copilotSessionQueueItems: [CopilotSessionQueueItem] = []
+    var copilotSessionSyncSettings = CopilotSessionSyncSettings()
     var activeAccountID: UUID?
 
-    static let currentVersion = 9
+    static let currentVersion = 10
 
     static let empty = AppDatabase(
         version: currentVersion,
@@ -361,6 +363,8 @@ struct AppDatabase: Codable, Sendable {
         copilotQuotaSnapshots: [:],
         switchLogs: [],
         cliLaunchHistoryByAccountID: [:],
+        copilotSessionQueueItems: [],
+        copilotSessionSyncSettings: CopilotSessionSyncSettings(),
         activeAccountID: nil
     )
 
@@ -502,6 +506,49 @@ struct AppDatabase: Codable, Sendable {
         }
     }
 
+    @discardableResult
+    mutating func upsertCopilotSessionQueueItem(_ item: CopilotSessionQueueItem) -> CopilotSessionQueueItem? {
+        if let index = copilotSessionQueueItems.firstIndex(where: { $0.matchesImportIdentity(of: item) }) {
+            let replacedItem = copilotSessionQueueItems[index]
+            copilotSessionQueueItems[index] = item
+            rememberCopilotSessionMonitorWorkspace(item.workspacePath)
+            return replacedItem
+        } else {
+            copilotSessionQueueItems.insert(item, at: 0)
+            rememberCopilotSessionMonitorWorkspace(item.workspacePath)
+            return nil
+        }
+    }
+
+    mutating func removeCopilotSessionQueueItem(id: UUID) {
+        copilotSessionQueueItems.removeAll(where: { $0.id == id })
+    }
+
+    mutating func archiveCopilotSessionQueueItem(id: UUID) {
+        guard let index = copilotSessionQueueItems.firstIndex(where: { $0.id == id }) else { return }
+        copilotSessionQueueItems[index].status = .archived
+    }
+
+    mutating func markCopilotSessionQueueItemSent(id: UUID, target: CopilotSessionQueueExecutionTarget) {
+        guard let index = copilotSessionQueueItems.firstIndex(where: { $0.id == id }) else { return }
+        copilotSessionQueueItems[index].status = .sent
+        copilotSessionQueueItems[index].lastSentAt = Date()
+        copilotSessionQueueItems[index].lastExecutionTarget = target
+    }
+
+    mutating func setCopilotSessionAutoMonitorEnabled(_ isEnabled: Bool) {
+        copilotSessionSyncSettings.isAutoMonitorEnabled = isEnabled
+    }
+
+    mutating func rememberCopilotSessionMonitorWorkspace(_ workspacePath: String) {
+        let normalizedPath = URL(fileURLWithPath: workspacePath, isDirectory: true).standardizedFileURL.path
+        guard !normalizedPath.isEmpty else { return }
+        var paths = copilotSessionSyncSettings.monitoredWorkspacePaths
+        paths.removeAll(where: { $0 == normalizedPath })
+        paths.insert(normalizedPath, at: 0)
+        copilotSessionSyncSettings.monitoredWorkspacePaths = paths
+    }
+
     mutating func moveAccount(id accountID: UUID, to destinationAccountID: UUID) {
         guard
             let sourceIndex = accounts.firstIndex(where: { $0.id == accountID }),
@@ -539,6 +586,8 @@ extension AppDatabase {
         case copilotQuotaSnapshots
         case switchLogs
         case cliLaunchHistoryByAccountID
+        case copilotSessionQueueItems
+        case copilotSessionSyncSettings
         case cliWorkingDirectoriesByAccountID
         case activeAccountID
         case cliEnvironmentProfiles
@@ -557,6 +606,8 @@ extension AppDatabase {
             ?? CLIEnvironmentProfile.builtInProfiles
         let defaultCLIEnvironmentIDByAccountID = try container.decodeIfPresent([String: String].self, forKey: .defaultCLIEnvironmentIDByAccountID) ?? [:]
         let cliLaunchHistoryByAccountID = try container.decodeIfPresent([String: [CLILaunchRecord]].self, forKey: .cliLaunchHistoryByAccountID) ?? [:]
+        let copilotSessionQueueItems = try container.decodeIfPresent([CopilotSessionQueueItem].self, forKey: .copilotSessionQueueItems) ?? []
+        let copilotSessionSyncSettings = try container.decodeIfPresent(CopilotSessionSyncSettings.self, forKey: .copilotSessionSyncSettings) ?? CopilotSessionSyncSettings()
         let legacyCLIDirectories = try container.decodeIfPresent([String: [String]].self, forKey: .cliWorkingDirectoriesByAccountID) ?? [:]
         let activeAccountID = try container.decodeIfPresent(UUID.self, forKey: .activeAccountID)
 
@@ -607,6 +658,8 @@ extension AppDatabase {
             copilotQuotaSnapshots: copilotQuotaSnapshots,
             switchLogs: switchLogs,
             cliLaunchHistoryByAccountID: cliLaunchHistoryByAccountID,
+            copilotSessionQueueItems: copilotSessionQueueItems,
+            copilotSessionSyncSettings: copilotSessionSyncSettings,
             activeAccountID: activeAccountID
         )
 
@@ -638,6 +691,8 @@ extension AppDatabase {
         try container.encode(copilotQuotaSnapshots, forKey: .copilotQuotaSnapshots)
         try container.encode(switchLogs, forKey: .switchLogs)
         try container.encode(cliLaunchHistoryByAccountID, forKey: .cliLaunchHistoryByAccountID)
+        try container.encode(copilotSessionQueueItems, forKey: .copilotSessionQueueItems)
+        try container.encode(copilotSessionSyncSettings, forKey: .copilotSessionSyncSettings)
         try container.encodeIfPresent(activeAccountID, forKey: .activeAccountID)
     }
 }

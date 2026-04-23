@@ -132,6 +132,11 @@ protocol CopilotStatusRefreshing: Sendable {
     func fetchStatus(using credential: CopilotCredential) async throws -> CopilotAccountStatus
 }
 
+protocol CopilotSessionQueueImporting: Sendable {
+    func sessions(for workspaceURL: URL) throws -> [CopilotSessionCandidate]
+    func importSession(_ candidate: CopilotSessionCandidate) throws -> CopilotSessionQueueItem
+}
+
 struct PreparedCopilotResponsesBridge: Equatable, Sendable {
     let baseURL: String
     let apiKeyEnvName: String
@@ -280,6 +285,12 @@ protocol CodexInstanceLaunching {
         context: ResolvedCodexDesktopLaunchContext,
         onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths
+
+    func launchIsolatedInstance(
+        context: ResolvedCodexDesktopLaunchContext,
+        deeplinkURL: URL?,
+        onTermination: @escaping @Sendable () -> Void
+    ) throws -> IsolatedCodexLaunchPaths
 }
 
 extension CodexInstanceLaunching {
@@ -301,10 +312,50 @@ extension CodexInstanceLaunching {
     ) throws -> IsolatedCodexLaunchPaths {
         try launchIsolatedInstance(context: context, onTermination: {})
     }
+
+    func launchIsolatedInstance(
+        context: ResolvedCodexDesktopLaunchContext,
+        deeplinkURL: URL?,
+        onTermination: @escaping @Sendable () -> Void
+    ) throws -> IsolatedCodexLaunchPaths {
+        try launchIsolatedInstance(context: context, onTermination: onTermination)
+    }
 }
 
 protocol CodexCLILaunching {
     func launchCLI(context: ResolvedCodexCLILaunchContext) throws
+    func launchCLI(
+        context: ResolvedCodexCLILaunchContext,
+        initialPrompt: String?,
+        additionalDirectoryURL: URL?
+    ) throws
+}
+
+extension CodexCLILaunching {
+    func launchCLI(
+        context: ResolvedCodexCLILaunchContext,
+        initialPrompt: String?,
+        additionalDirectoryURL: URL?
+    ) throws {
+        var arguments = context.arguments
+        if let additionalDirectoryURL {
+            arguments.append(contentsOf: ["--add-dir", additionalDirectoryURL.standardizedFileURL.path])
+        }
+        if let prompt = initialPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty {
+            arguments.append(prompt)
+        }
+        try launchCLI(context: ResolvedCodexCLILaunchContext(
+            accountID: context.accountID,
+            workingDirectoryURL: context.workingDirectoryURL,
+            mode: context.mode,
+            codexHomeURL: context.codexHomeURL,
+            authPayload: context.authPayload,
+            modelCatalogSnapshot: context.modelCatalogSnapshot,
+            configFileContents: context.configFileContents,
+            environmentVariables: context.environmentVariables,
+            arguments: arguments
+        ))
+    }
 }
 
 protocol ClaudeCLILaunching {

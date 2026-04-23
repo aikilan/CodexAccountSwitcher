@@ -58,6 +58,14 @@ struct CodexInstanceLauncher {
         context: ResolvedCodexDesktopLaunchContext,
         onTermination: @escaping @Sendable () -> Void
     ) throws -> IsolatedCodexLaunchPaths {
+        try launchIsolatedInstance(context: context, deeplinkURL: nil, onTermination: onTermination)
+    }
+
+    func launchIsolatedInstance(
+        context: ResolvedCodexDesktopLaunchContext,
+        deeplinkURL: URL?,
+        onTermination: @escaping @Sendable () -> Void
+    ) throws -> IsolatedCodexLaunchPaths {
         guard let appURL = resolveAppURL() else {
             throw CodexInstanceLauncherError.applicationNotFound
         }
@@ -85,7 +93,11 @@ struct CodexInstanceLauncher {
         let processID = UUID()
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = ["--user-data-dir=\(paths.userDataURL.path)"]
+        var arguments = ["--user-data-dir=\(paths.userDataURL.path)"]
+        if let deeplinkURL {
+            arguments.append(deeplinkURL.absoluteString)
+        }
+        process.arguments = arguments
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

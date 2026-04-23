@@ -166,6 +166,53 @@ final class CodexInstanceLauncherTests: XCTestCase {
         XCTAssertTrue(catalogContents.contains("\"slug\" : \"deepseek-reasoner\""))
     }
 
+    func testLaunchIsolatedInstanceAppendsDeeplinkArgument() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let appURL = root.appendingPathComponent("Codex.app", isDirectory: true)
+        let executableURL = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent("Codex", isDirectory: false)
+        let codexHomeURL = root
+            .appendingPathComponent("isolated-codex-instances", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("codex-home", isDirectory: true)
+        let deeplinkURL = URL(string: "codex://new?path=/tmp/next-erp-h5&prompt=handoff")!
+
+        try fileManager.createDirectory(at: executableURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        fileManager.createFile(atPath: executableURL.path, contents: Data("#!/bin/sh\nexit 0\n".utf8))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+
+        var capturedArguments: [String] = []
+        let launcher = CodexInstanceLauncher(
+            fileManager: fileManager,
+            resolveAppURL: { appURL },
+            runProcess: { process in
+                capturedArguments = process.arguments ?? []
+            }
+        )
+
+        let context = ResolvedCodexDesktopLaunchContext(
+            accountID: UUID(),
+            codexHomeURL: codexHomeURL,
+            authPayload: nil,
+            modelCatalogSnapshot: nil,
+            configFileContents: nil,
+            environmentVariables: [:]
+        )
+
+        let paths = try launcher.launchIsolatedInstance(context: context, deeplinkURL: deeplinkURL, onTermination: {})
+
+        XCTAssertEqual(
+            capturedArguments,
+            [
+                "--user-data-dir=\(paths.userDataURL.path)",
+                deeplinkURL.absoluteString,
+            ]
+        )
+    }
+
     func testLaunchIsolatedInstanceInvokesTerminationHandlerWhenProcessExits() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -755,6 +755,7 @@ private struct AccountDetailView: View {
     let onDelete: () -> Void
 
     @State private var draftName = ""
+    @State private var isShowingCopilotSessionImportSheet = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -782,6 +783,22 @@ private struct AccountDetailView: View {
         }
         .onChange(of: account.id) { _, _ in
             draftName = account.displayName
+        }
+        .sheet(isPresented: $isShowingCopilotSessionImportSheet) {
+            CopilotSessionImportSheet(
+                candidates: model.copilotSessionImportCandidates,
+                errorMessage: model.copilotSessionImportError,
+                isImporting: model.isImportingCopilotSession,
+                onImport: { candidate in
+                    Task {
+                        await model.importCopilotSession(candidate)
+                        isShowingCopilotSessionImportSheet = false
+                    }
+                },
+                onCancel: {
+                    isShowingCopilotSessionImportSheet = false
+                }
+            )
         }
     }
 
@@ -1037,6 +1054,10 @@ private struct AccountDetailView: View {
 
             Divider()
 
+            copilotSessionQueueSection
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 10) {
                 Text(L10n.tr("快捷操作"))
                     .font(.caption.weight(.semibold))
@@ -1083,6 +1104,69 @@ private struct AccountDetailView: View {
         }
         .padding(24)
         .orbitSurface(.accent, radius: OrbitRadius.hero)
+    }
+
+    private var copilotSessionQueueSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L10n.tr("Copilot 接力队列"))
+                        .font(.headline)
+                    Text(L10n.tr("从 VSCode 同目录 Copilot Chat session 生成本地 handoff，再交给当前选中账号继续。"))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 12)
+
+                Toggle(
+                    L10n.tr("自动监听"),
+                    isOn: Binding(
+                        get: { model.isCopilotSessionAutoMonitorEnabled },
+                        set: { model.setCopilotSessionAutoMonitorEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            Button {
+                chooseCopilotSessionWorkspace()
+            } label: {
+                Label(L10n.tr("导入 VSCode Copilot Session..."), systemImage: "tray.and.arrow.down")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            if model.copilotSessionQueueItems.isEmpty {
+                Text(L10n.tr("还没有导入的 Copilot session。"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(model.copilotSessionQueueItems.prefix(6))) { item in
+                        CopilotSessionQueueCard(
+                            item: item,
+                            isExecuting: model.executingCopilotSessionQueueItemID == item.id,
+                            isDesktopDisabled: !model.canSendCopilotSessionQueueItemToDesktop(for: account),
+                            isCLIDisabled: !account.supportsCodexCLI,
+                            onRunCLI: {
+                                Task { await model.executeCopilotSessionQueueItemInCLI(item) }
+                            },
+                            onRunDesktop: {
+                                Task { await model.executeCopilotSessionQueueItemInDesktop(item) }
+                            },
+                            onArchive: {
+                                model.archiveCopilotSessionQueueItem(item.id)
+                            },
+                            onDelete: {
+                                model.deleteCopilotSessionQueueItem(item.id)
+                            }
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private var secondaryLaunchActionsSection: some View {
@@ -1332,6 +1416,25 @@ private struct AccountDetailView: View {
                 target: selectedCLITarget,
                 workingDirectoryURL: URL(fileURLWithPath: record.path, isDirectory: true)
             )
+        }
+    }
+
+    private func chooseCopilotSessionWorkspace() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = L10n.tr("读取 Session")
+        panel.message = L10n.tr("选择 VSCode 中使用 Copilot Chat 的 workspace 目录。")
+        if let path = recentCLILaunches.first?.path {
+            panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        }
+
+        guard panel.runModal() == .OK, let directoryURL = panel.url else { return }
+        Task {
+            await model.loadCopilotSessionCandidates(for: directoryURL)
+            isShowingCopilotSessionImportSheet = true
         }
     }
 
@@ -1806,6 +1909,209 @@ private struct AccountDetailView: View {
         let remaining = value.remaining.map(String.init) ?? L10n.tr("未知")
         let limit = value.limit.map(String.init) ?? L10n.tr("未知")
         return "\(remaining) / \(limit)"
+    }
+}
+
+private struct CopilotSessionQueueCard: View {
+    let item: CopilotSessionQueueItem
+    let isExecuting: Bool
+    let isDesktopDisabled: Bool
+    let isCLIDisabled: Bool
+    let onRunCLI: () -> Void
+    let onRunDesktop: () -> Void
+    let onArchive: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(item.title)
+                            .font(.callout.weight(.semibold))
+                            .lineLimit(1)
+
+                        Text(item.status.displayName)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(item.status.foregroundColor)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(item.status.backgroundColor, in: Capsule())
+                    }
+
+                    Text(URL(fileURLWithPath: item.workspacePath, isDirectory: true).lastPathComponent)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    Text(item.lastMessageAt.formatted(date: .abbreviated, time: .standard))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer(minLength: 8)
+
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderless)
+                .help(L10n.tr("删除队列项"))
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    onRunCLI()
+                } label: {
+                    Label(isExecuting ? L10n.tr("发送中...") : L10n.tr("Codex CLI"), systemImage: "terminal")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isExecuting || isCLIDisabled || item.status != .pending)
+
+                Button {
+                    onRunDesktop()
+                } label: {
+                    Label(L10n.tr("Codex.app"), systemImage: "macwindow")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isExecuting || isDesktopDisabled || item.status != .pending)
+
+                Button {
+                    onArchive()
+                } label: {
+                    Label(L10n.tr("归档"), systemImage: "archivebox")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(item.status == .archived)
+
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(OrbitPalette.floatingPanel, in: RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous))
+    }
+}
+
+private struct CopilotSessionImportSheet: View {
+    let candidates: [CopilotSessionCandidate]
+    let errorMessage: String?
+    let isImporting: Bool
+    let onImport: (CopilotSessionCandidate) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L10n.tr("选择 Copilot Session"))
+                        .font(.title3.bold())
+                    Text(L10n.tr("Orbit 会生成本地 handoff 文件并加入接力队列。"))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(L10n.tr("关闭")) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if candidates.isEmpty {
+                Text(L10n.tr("该目录没有可导入的 Copilot Chat session。"))
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(candidates) { candidate in
+                            HStack(alignment: .top, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(candidate.title)
+                                        .font(.headline)
+                                        .lineLimit(1)
+
+                                    Text(candidate.sessionID)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+
+                                    HStack(spacing: 8) {
+                                        Text(candidate.lastMessageAt.formatted(date: .abbreviated, time: .standard))
+                                        if candidate.hasPendingEdits {
+                                            Text(L10n.tr("有待应用编辑"))
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                }
+
+                                Spacer()
+
+                                Button(isImporting ? L10n.tr("导入中...") : L10n.tr("导入")) {
+                                    onImport(candidate)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isImporting)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                OrbitPalette.floatingPanel,
+                                in: RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous)
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 620, height: 460, alignment: .topLeading)
+    }
+}
+
+private extension CopilotSessionQueueItemStatus {
+    var displayName: String {
+        switch self {
+        case .pending:
+            return L10n.tr("待接手")
+        case .sent:
+            return L10n.tr("已发送")
+        case .archived:
+            return L10n.tr("已归档")
+        }
+    }
+
+    var foregroundColor: Color {
+        switch self {
+        case .pending:
+            return OrbitPalette.accent
+        case .sent:
+            return .green
+        case .archived:
+            return .secondary
+        }
+    }
+
+    var backgroundColor: Color {
+        switch self {
+        case .pending:
+            return OrbitPalette.accentSoft
+        case .sent:
+            return OrbitPalette.successSoft
+        case .archived:
+            return OrbitPalette.chromeFill
+        }
     }
 }
 
