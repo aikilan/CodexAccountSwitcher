@@ -34,6 +34,13 @@ struct AddAccountSheet: View {
         .tint(OrbitPalette.accent)
         .animation(.easeOut(duration: 0.18), value: model.addAccountMode)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: model.addAccountCloseRequestID) { _, requestID in
+            guard requestID != nil else { return }
+            dismiss()
+        }
+        .onDisappear {
+            model.dismissAddAccountSheet()
+        }
     }
 
     private var header: some View {
@@ -134,6 +141,12 @@ struct AddAccountSheet: View {
                 .font(.title3.bold())
 
             if let authorizeURL = model.browserAuthorizeURL {
+                if model.isBrowserAuthorizationPending {
+                    progressRow(L10n.tr("等待浏览器授权完成，或在下方粘贴回调结果。"))
+                } else if model.isAuthenticating {
+                    progressRow(L10n.tr("正在验证授权结果。"))
+                }
+
                 Link(L10n.tr("重新打开授权页面"), destination: authorizeURL)
 
                 Text(L10n.tr("OpenClaw 文档使用的是固定回调地址 `http://localhost:1455/auth/callback`。如果浏览器没有自动返回，请把最终跳转 URL 或 code 粘贴到下面。"))
@@ -156,9 +169,13 @@ struct AddAccountSheet: View {
                     .disabled(model.isAuthenticating)
                 }
             } else {
-                Text(model.isReauthorizingAccount ? L10n.tr("点击底部按钮开始重新授权。") : L10n.tr("点击底部按钮开始浏览器登录。"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                if model.isReauthorizingAccount {
+                    reauthorizationStartPanel
+                } else {
+                    Text(L10n.tr("点击底部按钮开始浏览器登录。"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(20)
@@ -269,6 +286,10 @@ struct AddAccountSheet: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            if model.isAuthenticating {
+                progressRow(model.addAccountStatus)
+            }
+
             if !model.isReauthorizingAccount {
                 TextField(L10n.tr("显示名称（可选）"), text: $model.apiKeyDisplayName)
                     .textFieldStyle(.roundedBorder)
@@ -296,27 +317,114 @@ struct AddAccountSheet: View {
 
             Spacer()
 
-            Button(actionButtonTitle) {
-                Task {
-                    switch model.addAccountMode {
-                    case .chatgptBrowser:
-                        await model.startBrowserLogin()
-                    case .providerAPIKey:
-                        await model.startAPIKeyLogin()
-                    case .claudeProfile:
-                        await model.importClaudeProfile()
-                    case .githubCopilot:
-                        await model.startCopilotLogin()
+            if !usesInlineReauthorizationPrimaryAction {
+                Button {
+                    submitPrimaryAction()
+                } label: {
+                    HStack(spacing: 8) {
+                        if model.isAddAccountActionInProgress {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(actionButtonTitle)
                     }
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isAddAccountActionInProgress || !model.canAddAccountsInSheet)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.isAuthenticating || !model.canAddAccountsInSheet)
         }
         .padding(.horizontal, OrbitSpacing.section)
         .padding(.vertical, 18)
         .background(OrbitPalette.panel)
     }
 
-    private var actionButtonTitle: String { model.addAccountActionButtonTitle }
+    private var actionButtonTitle: String {
+        if model.isBrowserAuthorizationPending {
+            return L10n.tr("等待浏览器授权")
+        }
+        if model.isAuthenticating {
+            return L10n.tr("正在授权...")
+        }
+        return model.addAccountActionButtonTitle
+    }
+
+    private var usesInlineReauthorizationPrimaryAction: Bool {
+        model.isReauthorizingAccount && model.addAccountMode == .chatgptBrowser
+    }
+
+    private var reauthorizationStartPanel: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size: 32, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(OrbitPalette.accent)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.tr("重新连接当前账号"))
+                        .font(.headline)
+
+                    Text(L10n.tr("打开浏览器完成授权，Orbit 会自动更新本地凭据并激活该账号。"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Button {
+                submitPrimaryAction()
+            } label: {
+                HStack(spacing: 10) {
+                    if model.isAddAccountActionInProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Text(actionButtonTitle)
+                        .font(.headline)
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "arrow.up.forward.app.fill")
+                        .font(.callout.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.isAddAccountActionInProgress || !model.canAddAccountsInSheet)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .orbitSurface(.accent, radius: OrbitRadius.panel)
+    }
+
+    private func submitPrimaryAction() {
+        Task {
+            switch model.addAccountMode {
+            case .chatgptBrowser:
+                await model.startBrowserLogin()
+            case .providerAPIKey:
+                await model.startAPIKeyLogin()
+            case .claudeProfile:
+                await model.importClaudeProfile()
+            case .githubCopilot:
+                await model.startCopilotLogin()
+            }
+        }
+    }
+
+    private func progressRow(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .orbitSurface()
+    }
 }

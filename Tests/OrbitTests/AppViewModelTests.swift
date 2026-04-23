@@ -1641,9 +1641,37 @@ final class AppViewModelTests: XCTestCase {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
         let refreshedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_new")
+        let usageSnapshot = QuotaSnapshot(
+            primary: RateLimitWindowSnapshot(usedPercent: 12, windowMinutes: 300, resetsAt: nil),
+            secondary: RateLimitWindowSnapshot(usedPercent: 34, windowMinutes: 10080, resetsAt: nil),
+            credits: nil,
+            planType: "plus",
+            capturedAt: Date(),
+            source: .onlineUsageRefresh
+        )
         let authFileManager = RecordingAuthFileManager()
         let oauthClient = MockOAuthClient(
-            refreshResult: .failure(MockError.refreshFailed),
+            refreshResult: .success(
+                AuthLoginResult(
+                    payload: refreshedPayload,
+                    identity: AuthIdentity(
+                        accountID: "acct_cached",
+                        displayName: "Refreshed User",
+                        email: "refresh@example.com",
+                        planType: "plus"
+                    )
+                )
+            ),
+            usageResult: .success(
+                UsageRefreshResult(
+                    snapshot: usageSnapshot,
+                    email: "refresh@example.com",
+                    planType: "plus",
+                    allowed: true,
+                    limitReached: false,
+                    subscriptionDetails: SubscriptionDetails(allowed: true, limitReached: false)
+                )
+            ),
             browserLoginResult: .success(
                 AuthLoginResult(
                     payload: refreshedPayload,
@@ -1680,7 +1708,12 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.selectedAccount?.id, accountID)
         XCTAssertEqual(try harness.credentialStore.load(for: accountID).tokens.refreshToken, "refresh_new")
         XCTAssertEqual(authFileManager.activatedPayloads.last?.tokens.refreshToken, "refresh_new")
-        XCTAssertFalse(harness.model.isReauthorizingAccount)
+        XCTAssertEqual(oauthClient.refreshCallCount, 1)
+        XCTAssertNotNil(harness.model.snapshot(for: accountID))
+        XCTAssertEqual(account.lastStatusMessage, L10n.tr("状态与额度已更新：剩余 %@。", usageSnapshot.remainingSummary))
+        XCTAssertNotNil(harness.model.addAccountCloseRequestID)
+        XCTAssertFalse(harness.model.isBrowserAuthorizationPending)
+        XCTAssertFalse(harness.model.isAuthenticating)
     }
 
     func testReauthorizeChatGPTAccountRejectsMismatchedAccount() async throws {
@@ -1721,11 +1754,40 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.activeAccount?.id, nil)
         XCTAssertEqual(try harness.credentialStore.load(for: accountID).tokens.refreshToken, "refresh_old")
         XCTAssertTrue(authFileManager.activatedPayloads.isEmpty)
+        XCTAssertEqual(oauthClient.refreshCallCount, 0)
+        XCTAssertNil(harness.model.addAccountCloseRequestID)
         XCTAssertEqual(
             harness.model.addAccountError,
             L10n.tr("重新授权账号不匹配。请登录账号 %@。", "Cached User")
         )
         XCTAssertTrue(harness.model.isReauthorizingAccount)
+        XCTAssertFalse(harness.model.isBrowserAuthorizationPending)
+        XCTAssertFalse(harness.model.isAuthenticating)
+    }
+
+    func testReauthorizeChatGPTBrowserLoginShowsPendingAuthorizationState() async throws {
+        let accountID = UUID()
+        let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
+        let oauthClient = MockOAuthClient(refreshResult: .failure(MockError.refreshFailed))
+
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: cachedPayload,
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: oauthClient,
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        )
+
+        await harness.model.prepare()
+        harness.model.openReauthorize(for: accountID)
+        await harness.model.startBrowserLogin()
+
+        XCTAssertEqual(oauthClient.beginBrowserLoginCallCount, 1)
+        XCTAssertTrue(harness.model.isBrowserAuthorizationPending)
+        XCTAssertFalse(harness.model.isAuthenticating)
+        XCTAssertTrue(harness.model.isAddAccountActionInProgress)
+        XCTAssertNotNil(harness.model.browserAuthorizeURL)
+        XCTAssertNil(harness.model.addAccountCloseRequestID)
     }
 
     func testReauthorizeCopilotAccountUpdatesCredentialAndKeepsManagedConfigDirectory() async throws {
@@ -1748,7 +1810,16 @@ final class AppViewModelTests: XCTestCase {
             defaultModel: "gpt-4.1",
             source: .orbitOAuth
         )
-        let copilotProvider = RecordingCopilotProvider(importResult: .success(newCredential))
+        let copilotProvider = RecordingCopilotProvider(
+            importResult: .success(newCredential),
+            statusResult: .success(
+                CopilotAccountStatus(
+                    availableModels: ["gpt-4.1", "gpt-4o"],
+                    currentModel: "gpt-4.1",
+                    quotaSnapshot: nil
+                )
+            )
+        )
 
         let harness = try await makeHarness(
             accountID: accountID,
@@ -1803,7 +1874,12 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(storedCredential.githubAccessToken, "github_new")
         XCTAssertEqual(storedCredential.accessToken, "copilot_new")
         XCTAssertEqual(storedCredential.source, .orbitOAuth)
-        XCTAssertFalse(harness.model.isReauthorizingAccount)
+        XCTAssertEqual(account.lastStatusMessage, L10n.tr("GitHub Copilot 已验证：默认模型 %@。", "gpt-4.1"))
+        XCTAssertNotNil(harness.model.addAccountCloseRequestID)
+        XCTAssertFalse(harness.model.isAuthenticating)
+
+        let providerSnapshot = await copilotProvider.snapshot()
+        XCTAssertEqual(providerSnapshot.fetchStatusCallCount, 1)
     }
 
     func testReauthorizeCopilotAccountRejectsMismatchedAccount() async throws {
@@ -1886,16 +1962,20 @@ final class AppViewModelTests: XCTestCase {
         await harness.model.startCopilotLogin()
 
         let storedCredential = try XCTUnwrap(try harness.credentialStore.load(for: copilotAccountID).copilotCredential)
+        let providerSnapshot = await copilotProvider.snapshot()
         XCTAssertEqual(harness.model.accounts.count, 2)
         XCTAssertEqual(harness.model.activeAccount?.id, nil)
         XCTAssertEqual(storedCredential.configDirectoryName, "managed-copilot-dir")
         XCTAssertEqual(storedCredential.githubAccessToken, "github_old")
         XCTAssertEqual(storedCredential.accessToken, "copilot_old")
+        XCTAssertEqual(providerSnapshot.fetchStatusCallCount, 0)
+        XCTAssertNil(harness.model.addAccountCloseRequestID)
         XCTAssertEqual(
             harness.model.addAccountError,
             L10n.tr("重新授权账号不匹配。请登录账号 %@。", "GitHub Copilot • aikilan")
         )
         XCTAssertTrue(harness.model.isReauthorizingAccount)
+        XCTAssertFalse(harness.model.isAuthenticating)
     }
 
     func testProviderAPIKeyLoginDoesNotWriteCodexAuthForClaudeCompatibleAccount() async throws {

@@ -120,6 +120,8 @@ final class AppViewModel: ObservableObject {
     @Published var addAccountStatus = L10n.tr("选择账号接入方式。")
     @Published var addAccountError: String?
     @Published var isAuthenticating = false
+    @Published private(set) var isBrowserAuthorizationPending = false
+    @Published private(set) var addAccountCloseRequestID: UUID?
     @Published var browserAuthorizeURL: URL?
     @Published var browserCallbackInput = ""
     @Published var apiKeyInput = ""
@@ -416,6 +418,10 @@ final class AppViewModel: ObservableObject {
             return true
         }
         return false
+    }
+
+    var isAddAccountActionInProgress: Bool {
+        isAuthenticating || isBrowserAuthorizationPending
     }
 
     var reauthorizingAccount: ManagedAccount? {
@@ -1398,12 +1404,14 @@ final class AppViewModel: ObservableObject {
         addAccountStatus = L10n.tr("正在准备浏览器 OAuth。")
         browserCallbackInput = ""
         isAuthenticating = true
+        isBrowserAuthorizationPending = false
 
         do {
             let oauthClient = self.oauthClient
             let session = try await oauthClient.beginBrowserLogin(openURL: { NSWorkspace.shared.open($0) })
             browserSession = session
             browserAuthorizeURL = session.authorizeURL
+            isBrowserAuthorizationPending = true
 
             if let serverErrorDescription = session.serverErrorDescription {
                 addAccountStatus = L10n.tr("浏览器已打开，但本地 1455 回调端口未就绪：%@。请登录后把最终跳转 URL 或 code 粘贴回来。", serverErrorDescription)
@@ -1412,6 +1420,7 @@ final class AppViewModel: ObservableObject {
                 waitForBrowserCallback(session)
             }
         } catch {
+            isBrowserAuthorizationPending = false
             addAccountError = error.localizedDescription
             addAccountStatus = L10n.tr("浏览器登录失败。")
             database.appendLog(level: .error, message: L10n.tr("浏览器登录失败：%@", error.localizedDescription))
@@ -1434,6 +1443,8 @@ final class AppViewModel: ObservableObject {
         }
 
         browserWaitTask?.cancel()
+        browserWaitTask = nil
+        isBrowserAuthorizationPending = false
         isAuthenticating = true
         addAccountError = nil
         addAccountStatus = L10n.tr("正在验证你粘贴的回调结果。")
@@ -1756,6 +1767,10 @@ final class AppViewModel: ObservableObject {
         prepareProviderDesktopLaunch()
     }
 
+    private func requestAddAccountSheetClose() {
+        addAccountCloseRequestID = UUID()
+    }
+
     private func finalizeBrowserCodexLogin(_ result: AuthLoginResult) async throws {
         if case let .reauthorize(accountID) = addAccountSheetMode {
             try await finalizeCodexReauthorization(result, accountID: accountID)
@@ -1807,7 +1822,9 @@ final class AppViewModel: ObservableObject {
         database.appendLog(level: .info, message: L10n.tr("已为账号 %@ 重新登录授权并激活。", updatedAccount.displayName))
         try await persistDatabase()
         await verifySwitch(at: Date(), for: accountID)
-        dismissAddAccountSheet()
+        addAccountStatus = L10n.tr("授权已更新，正在刷新账号状态。")
+        _ = await refreshAccountStatus(accountID: accountID, showBanner: false)
+        requestAddAccountSheetClose()
     }
 
     private func finalizeClaudeLogin(
@@ -1918,7 +1935,9 @@ final class AppViewModel: ObservableObject {
         database.appendLog(level: .info, message: message)
         try await persistDatabase()
         pushBanner(level: .info, message: message)
-        dismissAddAccountSheet()
+        addAccountStatus = L10n.tr("授权已更新，正在刷新账号状态。")
+        _ = await refreshAccountStatus(accountID: accountID, showBanner: false)
+        requestAddAccountSheetClose()
     }
 
     private func saveEditedProvider(accountID: UUID) async {
@@ -3084,10 +3103,15 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             do {
                 let result = try await self.oauthClient.completeBrowserLogin(session: session)
+                self.isBrowserAuthorizationPending = false
+                self.isAuthenticating = true
                 self.addAccountStatus = L10n.tr("浏览器回调已收到，正在完成登录。")
                 try await self.finalizeBrowserCodexLogin(result)
+                self.isAuthenticating = false
             } catch {
                 guard !Task.isCancelled else { return }
+                self.isBrowserAuthorizationPending = false
+                self.isAuthenticating = false
                 self.addAccountError = error.localizedDescription
                 self.addAccountStatus = L10n.tr("未能自动接收浏览器回调。你可以改为手动粘贴 redirect URL 或 code。")
             }
@@ -3232,6 +3256,7 @@ final class AppViewModel: ObservableObject {
         addAccountProviderDisplayName = ""
         addAccountError = nil
         isAuthenticating = false
+        isBrowserAuthorizationPending = false
     }
 
     func applyDesktopLaunchPreset(_ preset: ProviderPreset?) {
