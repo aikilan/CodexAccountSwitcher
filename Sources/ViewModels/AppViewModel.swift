@@ -1250,6 +1250,7 @@ final class AppViewModel: ObservableObject {
         let thread = try await codexLocalThreadMaterializer.materializeCopilotSessionQueueItem(
             item,
             context: context,
+            initialPrompt: copilotSessionHandoffPrompt(for: item),
             developerInstructions: copilotSessionDeveloperInstructions(for: item)
         )
         database.markCopilotSessionQueueItemMaterialized(

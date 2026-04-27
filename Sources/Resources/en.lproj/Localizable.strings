@@ -445,3 +445,16 @@
 "完成" = "Completed";
 "失败" = "Failed";
 "ACP JSON-RPC 调用过程会实时追加到时间线。" = "ACP JSON-RPC activity is appended to the timeline in real time.";
+"更多功能" = "More";
+"同步 copilot 任务" = "Sync copilot tasks";
+"切换当前账号、启动独立实例或同步 copilot 任务。" = "Switch the current account, launch an isolated instance, or sync copilot tasks.";
+"从 VSCode 同目录 Copilot Chat session 生成本地 handoff，再同步给当前选中账号继续。" = "Generate a local handoff from the VSCode Copilot Chat session in the same workspace, then sync it to the selected account.";
+"导入 VSCode Copilot 任务..." = "Import VSCode Copilot Task...";
+"还没有同步的 copilot 任务。" = "No synced copilot tasks yet.";
+"启动与同步" = "Launch and Sync";
+"切换账号、启动独立实例，或同步 VSCode Copilot 任务。" = "Switch accounts, launch an isolated instance, or sync VSCode Copilot tasks.";
+"账号维护" = "Account Maintenance";
+"刷新状态、编辑配置或重新授权。" = "Refresh status, edit configuration, or reauthorize.";
+"工具" = "Tools";
+"预设启动" = "Preset Launch";
+"偏好设置" = "Preferences";

@@ -156,6 +156,7 @@ protocol CodexLocalThreadMaterializing: Sendable {
     func materializeCopilotSessionQueueItem(
         _ item: CopilotSessionQueueItem,
         context: ResolvedCodexLocalThreadMaterializationContext,
+        initialPrompt: String,
         developerInstructions: String
     ) async throws -> MaterializedCodexThread
 }

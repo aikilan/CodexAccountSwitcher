@@ -162,6 +162,7 @@ private struct NoopCodexLocalThreadMaterializer: CodexLocalThreadMaterializing {
     func materializeCopilotSessionQueueItem(
         _ item: CopilotSessionQueueItem,
         context: ResolvedCodexLocalThreadMaterializationContext,
+        initialPrompt: String,
         developerInstructions: String
     ) async throws -> MaterializedCodexThread {
         throw NSError(domain: "test", code: 1)

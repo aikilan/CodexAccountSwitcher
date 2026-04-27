@@ -4579,6 +4579,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(materializer.lastContext?.accountID, accountID)
         XCTAssertEqual(materializer.lastContext?.workingDirectoryURL.standardizedFileURL.path, workspaceURL.standardizedFileURL.path)
         XCTAssertNil(materializer.lastContext?.codexHomeURL)
+        XCTAssertTrue(materializer.lastInitialPrompt?.contains(item.handoffFilePath) == true)
         XCTAssertTrue(materializer.lastDeveloperInstructions?.contains(item.handoffFilePath) == true)
         XCTAssertEqual(queuedItem.status, .sent)
         XCTAssertEqual(queuedItem.codexThreadID, materializer.result.id)
@@ -5724,6 +5725,7 @@ private struct FailingCodexLocalThreadMaterializer: CodexLocalThreadMaterializin
     func materializeCopilotSessionQueueItem(
         _ item: CopilotSessionQueueItem,
         context: ResolvedCodexLocalThreadMaterializationContext,
+        initialPrompt: String,
         developerInstructions: String
     ) async throws -> MaterializedCodexThread {
         throw MockError.unused
@@ -5734,6 +5736,7 @@ private final class RecordingCodexLocalThreadMaterializer: @unchecked Sendable, 
     var materializeCallCount = 0
     var lastItem: CopilotSessionQueueItem?
     var lastContext: ResolvedCodexLocalThreadMaterializationContext?
+    var lastInitialPrompt: String?
     var lastDeveloperInstructions: String?
     var result = MaterializedCodexThread(id: "019db9c1-0000-7000-8000-000000000001", path: "/tmp/codex-thread.jsonl")
     var error: Error?
@@ -5741,6 +5744,7 @@ private final class RecordingCodexLocalThreadMaterializer: @unchecked Sendable, 
     func materializeCopilotSessionQueueItem(
         _ item: CopilotSessionQueueItem,
         context: ResolvedCodexLocalThreadMaterializationContext,
+        initialPrompt: String,
         developerInstructions: String
     ) async throws -> MaterializedCodexThread {
         if let error {
@@ -5749,6 +5753,7 @@ private final class RecordingCodexLocalThreadMaterializer: @unchecked Sendable, 
         materializeCallCount += 1
         lastItem = item
         lastContext = context
+        lastInitialPrompt = initialPrompt
         lastDeveloperInstructions = developerInstructions
         return result
     }

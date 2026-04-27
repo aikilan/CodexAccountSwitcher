@@ -235,12 +235,6 @@ struct ContentView: View {
                             .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
                         }
 
-                        if model.canReauthorizeAccount(account) {
-                            Button(L10n.tr("重新登录授权")) {
-                                presentReauthorizeWindow(for: account.id)
-                            }
-                            .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
-                        }
                     }
                 }
             }
@@ -270,7 +264,34 @@ struct ContentView: View {
     }
 
     private var sidebarFooter: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
+            sidebarQuickActions
+
+            Divider()
+
+            sidebarPreferences
+
+            if !model.focusedPlatformUnsupportedMessage.isEmpty {
+                Text(model.focusedPlatformUnsupportedMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let homePath = model.focusedPlatformHomePath {
+                Text(homePath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(SidebarLayoutMetrics.footerPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var sidebarQuickActions: some View {
+        VStack(alignment: .leading, spacing: 10) {
             Text(L10n.tr("快捷操作"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -279,44 +300,71 @@ struct ContentView: View {
                 presentAddAccountWindow()
             } label: {
                 Label(L10n.tr("新增账号"), systemImage: "plus.circle.fill")
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
             .disabled(!model.canAddAccounts)
 
-            Button {
-                presentProviderDesktopLaunchWindow()
-            } label: {
-                Label(L10n.tr("预设启动 Codex"), systemImage: "bolt.circle.fill")
-            }
-            .buttonStyle(.bordered)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.tr("工具"))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
 
-            Button {
-                presentWindow(id: "copilot-acp-debug")
-            } label: {
-                Label(L10n.tr("ACP 调试"), systemImage: "ladybug")
-            }
-            .buttonStyle(.bordered)
+                HStack(spacing: 8) {
+                    Button {
+                        presentProviderDesktopLaunchWindow()
+                    } label: {
+                        Label(L10n.tr("预设启动"), systemImage: "bolt.circle.fill")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
 
-            if let homeButtonTitle = model.focusedPlatformHomeButtonTitle {
+                    Button {
+                        presentWindow(id: "copilot-acp-debug")
+                    } label: {
+                        Label(L10n.tr("ACP 调试"), systemImage: "ladybug")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                }
+
+                if let homeButtonTitle = model.focusedPlatformHomeButtonTitle {
+                    Button {
+                        model.openFocusedPlatformHomeInFinder()
+                    } label: {
+                        Label(homeButtonTitle, systemImage: "folder")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
                 Button {
-                    model.openFocusedPlatformHomeInFinder()
+                    Task { await model.refreshAllAccountStatuses() }
                 } label: {
-                    Label(homeButtonTitle, systemImage: "folder")
+                    Label(model.isRefreshingAllStatuses ? L10n.tr("正在刷新账号状态...") : L10n.tr("刷新全部状态"), systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(1)
                 }
                 .buttonStyle(.bordered)
+                .disabled(
+                    model.isRefreshingAllStatuses
+                        || model.accounts.isEmpty
+                        || !model.focusedPlatformCapabilities.supportsStatusRefresh
+                )
             }
+        }
+    }
 
-            Button {
-                Task { await model.refreshAllAccountStatuses() }
-            } label: {
-                Label(model.isRefreshingAllStatuses ? L10n.tr("正在刷新账号状态...") : L10n.tr("刷新全部状态"), systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
-            .disabled(
-                model.isRefreshingAllStatuses
-                    || model.accounts.isEmpty
-                    || !model.focusedPlatformCapabilities.supportsStatusRefresh
-            )
+    private var sidebarPreferences: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L10n.tr("偏好设置"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.tr("语言"))
@@ -337,7 +385,6 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
             }
-            .padding(.top, 4)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.tr("外观"))
@@ -358,24 +405,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
             }
-
-            if !model.focusedPlatformUnsupportedMessage.isEmpty {
-                Text(model.focusedPlatformUnsupportedMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let homePath = model.focusedPlatformHomePath {
-                Text(homePath)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
         }
-        .padding(SidebarLayoutMetrics.footerPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var resolvedSelectedAccountID: UUID? {
@@ -755,6 +785,7 @@ private struct AccountDetailView: View {
     let onDelete: () -> Void
 
     @State private var draftName = ""
+    @State private var isShowingCopilotSessionQueueSheet = false
     @State private var isShowingCopilotSessionImportSheet = false
 
     var body: some View {
@@ -799,6 +830,28 @@ private struct AccountDetailView: View {
                     isShowingCopilotSessionImportSheet = false
                 }
             )
+        }
+        .sheet(isPresented: $isShowingCopilotSessionQueueSheet) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text(L10n.tr("同步 copilot 任务"))
+                        .font(.title3.bold())
+
+                    Spacer()
+
+                    Button(L10n.tr("关闭")) {
+                        isShowingCopilotSessionQueueSheet = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+
+                ScrollView {
+                    copilotSessionQueueSection
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(20)
+            .frame(width: 680, height: 520, alignment: .topLeading)
         }
     }
 
@@ -1054,53 +1107,7 @@ private struct AccountDetailView: View {
 
             Divider()
 
-            copilotSessionQueueSection
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text(L10n.tr("快捷操作"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 10) {
-                    Button(model.isRefreshingStatus(for: account.id) ? L10n.tr("正在更新状态...") : L10n.tr("手动更新状态")) {
-                        onRefreshStatus()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(model.isRefreshingStatus(for: account.id) || model.isRefreshingAllStatuses || model.isSwitchInProgress)
-                }
-
-                HStack(spacing: 10) {
-                    if model.canEditProviderAccount(account) {
-                        Button(L10n.tr("编辑供应商")) {
-                            onEditProvider()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
-                    }
-
-                    if model.canReauthorizeAccount(account) {
-                        Button(L10n.tr("重新登录授权")) {
-                            onReauthorize()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
-                    }
-
-                    if model.canOperateMainCodexInstance(for: account) {
-                        Button(model.isRestartingCodex ? model.mainCodexInstanceActionInProgressTitle : model.mainCodexInstanceActionTitle) {
-                            Task { @MainActor in await model.performBannerAction(.restartCodex) }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(model.isRestartingCodex)
-                    }
-                }
-            }
+            accountMaintenanceActionsSection
         }
         .padding(24)
         .orbitSurface(.accent, radius: OrbitRadius.hero)
@@ -1110,9 +1117,9 @@ private struct AccountDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(L10n.tr("Copilot 接力队列"))
+                    Text(L10n.tr("同步 copilot 任务"))
                         .font(.headline)
-                    Text(L10n.tr("从 VSCode 同目录 Copilot Chat session 生成本地 handoff，再交给当前选中账号继续。"))
+                    Text(L10n.tr("从 VSCode 同目录 Copilot Chat session 生成本地 handoff，再同步给当前选中账号继续。"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1133,13 +1140,13 @@ private struct AccountDetailView: View {
             Button {
                 chooseCopilotSessionWorkspace()
             } label: {
-                Label(L10n.tr("导入 VSCode Copilot Session..."), systemImage: "tray.and.arrow.down")
+                Label(L10n.tr("导入 VSCode Copilot 任务..."), systemImage: "tray.and.arrow.down")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
 
             if model.copilotSessionQueueItems.isEmpty {
-                Text(L10n.tr("还没有导入的 Copilot session。"))
+                Text(L10n.tr("还没有同步的 copilot 任务。"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -1170,14 +1177,16 @@ private struct AccountDetailView: View {
     }
 
     private var secondaryLaunchActionsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(L10n.tr("附加操作"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L10n.tr("启动与同步"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
 
-            Text(L10n.tr("切换当前账号或启动独立实例。"))
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                Text(L10n.tr("切换账号、启动独立实例，或同步 VSCode Copilot 任务。"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack(spacing: 10) {
                 Button(switchButtonTitle) {
@@ -1194,6 +1203,68 @@ private struct AccountDetailView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(isIsolatedInstanceActionDisabled)
+                }
+
+                Button {
+                    isShowingCopilotSessionQueueSheet = true
+                } label: {
+                    Label(L10n.tr("同步 copilot 任务"), systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var accountMaintenanceActionsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L10n.tr("账号维护"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(L10n.tr("刷新状态、编辑配置或重新授权。"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button(model.isRefreshingStatus(for: account.id) ? L10n.tr("正在更新状态...") : L10n.tr("手动更新状态")) {
+                        onRefreshStatus()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.isRefreshingStatus(for: account.id) || model.isRefreshingAllStatuses || model.isSwitchInProgress)
+
+                    if model.canOperateMainCodexInstance(for: account) {
+                        Button(model.isRestartingCodex ? model.mainCodexInstanceActionInProgressTitle : model.mainCodexInstanceActionTitle) {
+                            Task { @MainActor in await model.performBannerAction(.restartCodex) }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(model.isRestartingCodex)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    if model.canEditProviderAccount(account) {
+                        Button(L10n.tr("编辑供应商")) {
+                            onEditProvider()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+                    }
+
+                    if model.canReauthorizeAccount(account) {
+                        Button(L10n.tr("重新登录授权")) {
+                            onReauthorize()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(model.isRefreshingStatus(for: account.id) || model.isSwitchInProgress)
+                    }
                 }
             }
         }
@@ -1432,6 +1503,7 @@ private struct AccountDetailView: View {
         }
 
         guard panel.runModal() == .OK, let directoryURL = panel.url else { return }
+        isShowingCopilotSessionQueueSheet = false
         Task {
             await model.loadCopilotSessionCandidates(for: directoryURL)
             isShowingCopilotSessionImportSheet = true

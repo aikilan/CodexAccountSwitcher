@@ -443,3 +443,16 @@
 "完成" = "完成";
 "失败" = "失败";
 "ACP JSON-RPC 调用过程会实时追加到时间线。" = "ACP JSON-RPC 调用过程会实时追加到时间线。";
+"更多功能" = "更多功能";
+"同步 copilot 任务" = "同步 copilot 任务";
+"切换当前账号、启动独立实例或同步 copilot 任务。" = "切换当前账号、启动独立实例或同步 copilot 任务。";
+"从 VSCode 同目录 Copilot Chat session 生成本地 handoff，再同步给当前选中账号继续。" = "从 VSCode 同目录 Copilot Chat session 生成本地 handoff，再同步给当前选中账号继续。";
+"导入 VSCode Copilot 任务..." = "导入 VSCode Copilot 任务...";
+"还没有同步的 copilot 任务。" = "还没有同步的 copilot 任务。";
+"启动与同步" = "启动与同步";
+"切换账号、启动独立实例，或同步 VSCode Copilot 任务。" = "切换账号、启动独立实例，或同步 VSCode Copilot 任务。";
+"账号维护" = "账号维护";
+"刷新状态、编辑配置或重新授权。" = "刷新状态、编辑配置或重新授权。";
+"工具" = "工具";
+"预设启动" = "预设启动";
+"偏好设置" = "偏好设置";
