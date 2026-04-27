@@ -106,23 +106,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureWindowDelegates()
     }
 
-    @objc
-    private func handleMainWindowMiniaturize(_ sender: Any?) {
-        guard let button = sender as? NSButton,
-              let window = button.window,
-              isOrbitWindow(window)
-        else {
-            NSApp.keyWindow?.miniaturize(sender)
-            return
-        }
-        hideMainWindowToStatusBar(window)
-    }
-
     private func configureWindowDelegates() {
         for window in NSApp.windows where isOrbitWindow(window) {
             window.delegate = self
-            window.standardWindowButton(.miniaturizeButton)?.target = self
-            window.standardWindowButton(.miniaturizeButton)?.action = #selector(handleMainWindowMiniaturize(_:))
         }
     }
 
@@ -152,14 +138,5 @@ extension AppDelegate: NSWindowDelegate {
         guard isOrbitWindow(sender) else { return true }
         hideMainWindowToStatusBar(sender)
         return false
-    }
-
-    func windowDidMiniaturize(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              isOrbitWindow(window)
-        else { return }
-
-        window.deminiaturize(nil)
-        hideMainWindowToStatusBar(window)
     }
 }

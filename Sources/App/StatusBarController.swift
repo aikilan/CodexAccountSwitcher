@@ -52,7 +52,6 @@ final class StatusBarController: NSObject {
     private let popover = NSPopover()
     private let model: AppViewModel
     private let openWindow: (String) -> Void
-    private var pendingSingleClickWorkItem: DispatchWorkItem?
 
     init(model: AppViewModel, openWindow: @escaping (String) -> Void) {
         self.model = model
@@ -77,15 +76,9 @@ final class StatusBarController: NSObject {
 
         switch event.type {
         case .rightMouseUp:
-            cancelPendingSingleClick()
             togglePopover(relativeTo: button)
         case .leftMouseUp:
-            if event.clickCount >= 2 {
-                cancelPendingSingleClick()
-                togglePopover(relativeTo: button)
-            } else {
-                scheduleSingleClick()
-            }
+            openMainPanel()
         default:
             openMainPanel()
         }
@@ -133,22 +126,6 @@ final class StatusBarController: NSObject {
         let resolvedHeight = height > 0 ? ceil(height) : Self.defaultPopoverHeight
         guard abs(popover.contentSize.height - resolvedHeight) > 1 else { return }
         popover.contentSize = NSSize(width: Self.popoverWidth, height: resolvedHeight)
-    }
-
-    private func scheduleSingleClick() {
-        cancelPendingSingleClick()
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.openMainPanel()
-        }
-
-        pendingSingleClickWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: workItem)
-    }
-
-    private func cancelPendingSingleClick() {
-        pendingSingleClickWorkItem?.cancel()
-        pendingSingleClickWorkItem = nil
     }
 
     private func openMainPanel() {
