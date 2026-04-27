@@ -1334,7 +1334,9 @@ private struct AccountDetailView: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous)
                             .strokeBorder(deleteButtonBorderColor, lineWidth: 1)
+                            .allowsHitTesting(false)
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: OrbitRadius.row, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(isDeleteActionDisabled)
