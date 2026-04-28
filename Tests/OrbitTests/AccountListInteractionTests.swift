@@ -62,6 +62,75 @@ final class AccountListInteractionTests: XCTestCase {
         XCTAssertEqual(reordered, [first, second, third])
     }
 
+    func testPreviewOrderMovesDraggedAccountAcrossMultipleRows() {
+        let first = UUID()
+        let second = UUID()
+        let third = UUID()
+        let fourth = UUID()
+        let frames: [UUID: CGRect] = [
+            first: CGRect(x: 0, y: 0, width: 100, height: 80),
+            second: CGRect(x: 0, y: 88, width: 100, height: 80),
+            third: CGRect(x: 0, y: 176, width: 100, height: 80),
+            fourth: CGRect(x: 0, y: 264, width: 100, height: 80),
+        ]
+
+        let reordered = AccountListReorderLogic.previewOrder(
+            currentOrder: [first, second, third, fourth],
+            draggedAccountID: first,
+            draggedMidY: 320,
+            rowFrames: frames
+        )
+
+        XCTAssertEqual(reordered, [second, third, fourth, first])
+    }
+
+    func testVisualOffsetKeepsDraggedAccountOnGestureTranslationAndMovesRowsIntoPreviewSlots() {
+        let first = UUID()
+        let second = UUID()
+        let third = UUID()
+        let initialOrder = [first, second, third]
+        let previewOrder = [first, third, second]
+        let frames: [UUID: CGRect] = [
+            first: CGRect(x: 0, y: 0, width: 100, height: 80),
+            second: CGRect(x: 0, y: 88, width: 100, height: 80),
+            third: CGRect(x: 0, y: 176, width: 100, height: 80),
+        ]
+
+        XCTAssertEqual(
+            AccountListReorderLogic.visualOffsetY(
+                accountID: second,
+                draggedAccountID: second,
+                dragTranslationHeight: 104,
+                initialOrder: initialOrder,
+                previewOrder: previewOrder,
+                initialRowFrames: frames
+            ),
+            104
+        )
+        XCTAssertEqual(
+            AccountListReorderLogic.visualOffsetY(
+                accountID: third,
+                draggedAccountID: second,
+                dragTranslationHeight: 104,
+                initialOrder: initialOrder,
+                previewOrder: previewOrder,
+                initialRowFrames: frames
+            ),
+            -88
+        )
+        XCTAssertEqual(
+            AccountListReorderLogic.visualOffsetY(
+                accountID: first,
+                draggedAccountID: second,
+                dragTranslationHeight: 104,
+                initialOrder: initialOrder,
+                previewOrder: previewOrder,
+                initialRowFrames: frames
+            ),
+            0
+        )
+    }
+
     func testDestinationAccountIDUsesPreviousItemWhenDraggingDown() {
         let first = UUID()
         let second = UUID()

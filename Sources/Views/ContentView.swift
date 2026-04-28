@@ -10,18 +10,23 @@ private enum SidebarLayoutMetrics {
     static let footerPadding: CGFloat = 18
 }
 
+private struct AccountDragSession {
+    let accountID: UUID
+    let initialOrder: [UUID]
+    let initialRowFrames: [UUID: CGRect]
+    let startFrame: CGRect
+    var translation: CGSize
+    var previewOrder: [UUID]
+}
+
 @MainActor
 struct ContentView: View {
     @ObservedObject var model: AppViewModel
     @Environment(\.openWindow) private var openWindow
     @AppStorage(AppAppearancePreference.storageKey) private var appearancePreference = AppAppearancePreference.system.rawValue
-    @State private var draggedAccountID: UUID?
-    @State private var dropTargetAccountID: UUID?
+    @State private var accountDragSession: AccountDragSession?
     @State private var hoveredAccountID: UUID?
     @State private var accountRowFrames: [UUID: CGRect] = [:]
-    @State private var accountDragStartFrame: CGRect?
-    @State private var accountDragTranslation: CGSize = .zero
-    @State private var hasAccountOrderChangesDuringDrag = false
     private let accountListCoordinateSpaceName = "account-list-coordinate-space"
 
     var body: some View {
@@ -176,28 +181,35 @@ struct ContentView: View {
                         claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
                         copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
                         isSelected: resolvedSelectedAccountID == account.id,
-                        isDropTarget: dropTargetAccountID == account.id,
-                        isHovering: hoveredAccountID == account.id,
-                        isDragging: draggedAccountID == account.id,
+                        isDropTarget: false,
+                        isHovering: hoveredAccountID == account.id && accountDragSession == nil,
+                        isDragging: accountDragSession?.accountID == account.id,
                         isRefreshingStatus: model.isRefreshingStatus(for: account.id)
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(accountRowFrameReader(for: account.id))
                     .offset(y: accountDragVisualOffsetY(for: account.id))
+                    .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.88), value: accountDragSession?.previewOrder)
+                    .transaction { t in
+                        if accountDragSession?.accountID == account.id {
+                            t.animation = nil
+                        }
+                    }
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        guard draggedAccountID == nil else { return }
+                        guard accountDragSession == nil else { return }
                         model.selectedAccountID = account.id
                     }
                     .simultaneousGesture(accountReorderGesture(for: account))
                     .onHover { hovering in
+                        guard accountDragSession == nil else { return }
                         if hovering {
                             hoveredAccountID = account.id
                         } else if hoveredAccountID == account.id {
                             hoveredAccountID = nil
                         }
                     }
-                    .zIndex(draggedAccountID == account.id ? 1 : 0)
+                    .zIndex(accountDragSession?.accountID == account.id ? 1 : 0)
                     .contextMenu {
                         Button(account.isActive ? L10n.tr("当前正在使用") : L10n.tr("切换到此账号")) {
                             Task { @MainActor in await model.switchToAccount(account) }
@@ -227,6 +239,7 @@ struct ContentView: View {
         .coordinateSpace(name: accountListCoordinateSpaceName)
         .onPreferenceChange(AccountRowFramePreferenceKey.self) { frames in
             Task { @MainActor in
+                guard accountDragSession == nil else { return }
                 accountRowFrames = frames
             }
         }
@@ -511,23 +524,35 @@ struct ContentView: View {
         }
     }
 
-    // 核心拖拽方法：整卡接收 DragGesture，用卡片中点跨过相邻卡片中线作为重排阈值。
+    // 核心拖拽方法：拖拽中只更新视觉预览，真实账号顺序在松手时一次性提交。
     private func accountReorderGesture(for account: ManagedAccount) -> some Gesture {
         DragGesture(minimumDistance: 6, coordinateSpace: .named(accountListCoordinateSpaceName))
             .onChanged { value in
                 guard model.accounts.count > 1 else { return }
                 beginAccountDragIfNeeded(account.id)
-                guard draggedAccountID == account.id else { return }
+                guard var session = accountDragSession, session.accountID == account.id else { return }
 
-                accountDragTranslation = value.translation
-                if accountDragStartFrame == nil {
-                    accountDragStartFrame = accountRowFrames[account.id]
-                }
-                guard let startFrame = accountDragStartFrame else { return }
-                updateAccountOrderDuringDrag(
+                let previewOrder = AccountListReorderLogic.previewOrder(
+                    currentOrder: session.initialOrder,
                     draggedAccountID: account.id,
-                    draggedMidY: startFrame.midY + value.translation.height
+                    draggedMidY: session.startFrame.midY + value.translation.height,
+                    rowFrames: session.initialRowFrames
                 )
+                let shouldAnimatePreview = previewOrder != session.previewOrder
+                session.translation = value.translation
+                session.previewOrder = previewOrder
+
+                if shouldAnimatePreview {
+                    withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
+                        accountDragSession = session
+                    }
+                } else {
+                    var transaction = Transaction()
+                    transaction.animation = nil
+                    withTransaction(transaction) {
+                        accountDragSession = session
+                    }
+                }
             }
             .onEnded { _ in
                 finishAccountDrag()
@@ -535,63 +560,46 @@ struct ContentView: View {
     }
 
     private func beginAccountDragIfNeeded(_ accountID: UUID) {
-        guard draggedAccountID == nil else { return }
-        draggedAccountID = accountID
-        accountDragStartFrame = accountRowFrames[accountID]
-        accountDragTranslation = .zero
-        dropTargetAccountID = nil
-        hasAccountOrderChangesDuringDrag = false
-    }
-
-    private func updateAccountOrderDuringDrag(draggedAccountID: UUID, draggedMidY: CGFloat) {
-        let currentOrder = model.accounts.map(\.id)
-        let previewOrder = AccountListReorderLogic.previewOrder(
-            currentOrder: currentOrder,
-            draggedAccountID: draggedAccountID,
-            draggedMidY: draggedMidY,
-            rowFrames: accountRowFrames
+        guard accountDragSession == nil, let startFrame = accountRowFrames[accountID] else { return }
+        let initialOrder = model.accounts.map(\.id)
+        accountDragSession = AccountDragSession(
+            accountID: accountID,
+            initialOrder: initialOrder,
+            initialRowFrames: accountRowFrames,
+            startFrame: startFrame,
+            translation: .zero,
+            previewOrder: initialOrder
         )
-        guard previewOrder != currentOrder else {
-            dropTargetAccountID = nil
-            return
-        }
-        guard let destinationAccountID = AccountListReorderLogic.destinationAccountID(
-            currentOrder: currentOrder,
-            previewOrder: previewOrder,
-            draggedAccountID: draggedAccountID
-        ) else {
-            return
-        }
-
-        dropTargetAccountID = destinationAccountID
-        hasAccountOrderChangesDuringDrag = true
-        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
-            model.moveAccount(draggedAccountID, to: destinationAccountID, persist: false)
-        }
+        hoveredAccountID = nil
     }
 
     private func accountDragVisualOffsetY(for accountID: UUID) -> CGFloat {
-        guard draggedAccountID == accountID else { return 0 }
-        guard
-            let startFrame = accountDragStartFrame,
-            let currentFrame = accountRowFrames[accountID]
-        else {
-            return accountDragTranslation.height
-        }
-
-        return accountDragTranslation.height - (currentFrame.minY - startFrame.minY)
+        guard let session = accountDragSession else { return 0 }
+        return AccountListReorderLogic.visualOffsetY(
+            accountID: accountID,
+            draggedAccountID: session.accountID,
+            dragTranslationHeight: session.translation.height,
+            initialOrder: session.initialOrder,
+            previewOrder: session.previewOrder,
+            initialRowFrames: session.initialRowFrames
+        )
     }
 
     private func finishAccountDrag() {
-        let shouldPersistOrder = hasAccountOrderChangesDuringDrag
+        guard let session = accountDragSession else { return }
+        let destinationAccountID = AccountListReorderLogic.destinationAccountID(
+            currentOrder: session.initialOrder,
+            previewOrder: session.previewOrder,
+            draggedAccountID: session.accountID
+        )
+
         withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.9)) {
-            draggedAccountID = nil
-            dropTargetAccountID = nil
-            accountDragStartFrame = nil
-            accountDragTranslation = .zero
-            hasAccountOrderChangesDuringDrag = false
+            if let destinationAccountID {
+                model.moveAccount(session.accountID, to: destinationAccountID, persist: false)
+            }
+            accountDragSession = nil
         }
-        if shouldPersistOrder {
+        if destinationAccountID != nil {
             model.persistAccountOrder()
         }
     }

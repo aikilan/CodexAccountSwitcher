@@ -41,6 +41,37 @@ enum AccountListReorderLogic {
         let destinationIndex = targetIndex - 1
         return previewOrder.indices.contains(destinationIndex) ? previewOrder[destinationIndex] : nil
     }
+
+    // 输入：拖拽开始时的顺序和行 frame；输出：当前账号在拖拽预览中的视觉纵向偏移。
+    static func visualOffsetY(
+        accountID: UUID,
+        draggedAccountID: UUID,
+        dragTranslationHeight: CGFloat,
+        initialOrder: [UUID],
+        previewOrder: [UUID],
+        initialRowFrames: [UUID: CGRect]
+    ) -> CGFloat {
+        if accountID == draggedAccountID {
+            return dragTranslationHeight
+        }
+
+        guard
+            let sourceIndex = initialOrder.firstIndex(of: accountID),
+            let targetIndex = previewOrder.firstIndex(of: accountID),
+            sourceIndex != targetIndex,
+            initialOrder.indices.contains(targetIndex),
+            let sourceFrame = initialRowFrames[accountID]
+        else {
+            return 0
+        }
+
+        let targetSlotAccountID = initialOrder[targetIndex]
+        guard let targetFrame = initialRowFrames[targetSlotAccountID] else {
+            return 0
+        }
+
+        return targetFrame.minY - sourceFrame.minY
+    }
 }
 
 enum AccountListAutoScrollLogic {
