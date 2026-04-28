@@ -166,39 +166,28 @@ struct ContentView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(model.accounts) { account in
-                    ZStack(alignment: .trailing) {
-                        Button {
-                            model.selectedAccountID = account.id
-                        } label: {
-                            AccountListRow(
-                                account: account,
-                                snapshot: model.snapshot(for: account.id),
-                                claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
-                                copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
-                                isSelected: resolvedSelectedAccountID == account.id,
-                                isDropTarget: dropTargetAccountID == account.id,
-                                isHovering: hoveredAccountID == account.id,
-                                isRefreshingStatus: model.isRefreshingStatus(for: account.id),
-                                showsReorderHandle: model.accounts.count > 1
-                            )
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        if model.accounts.count > 1 {
-                            Image(systemName: "line.3.horizontal")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(.secondary)
-                                .opacity(reorderHandleOpacity(for: account.id))
-                                .padding(.trailing, 12)
-                                .contentShape(Rectangle())
-                                .allowsHitTesting(shouldShowReorderHandle(for: account.id))
-                                .onDrag {
-                                    draggedAccountID = account.id
-                                    return NSItemProvider(object: account.id.uuidString as NSString)
-                                }
-                        }
+                    Button {
+                        model.selectedAccountID = account.id
+                    } label: {
+                        AccountListRow(
+                            account: account,
+                            snapshot: model.snapshot(for: account.id),
+                            claudeSnapshot: model.claudeRateLimitSnapshot(for: account.id),
+                            copilotSnapshot: model.copilotQuotaSnapshot(for: account.id),
+                            isSelected: resolvedSelectedAccountID == account.id,
+                            isDropTarget: dropTargetAccountID == account.id,
+                            isHovering: hoveredAccountID == account.id,
+                            isDragging: draggedAccountID == account.id,
+                            isRefreshingStatus: model.isRefreshingStatus(for: account.id)
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onDrag {
+                        draggedAccountID = account.id
+                        dropTargetAccountID = nil
+                        return NSItemProvider(object: account.id.uuidString as NSString)
                     }
                     .onHover { hovering in
                         if hovering {
@@ -214,10 +203,14 @@ struct ContentView: View {
                             draggedAccountID: $draggedAccountID,
                             dropTargetAccountID: $dropTargetAccountID,
                             onMove: { sourceAccountID, destinationAccountID in
-                                model.moveAccount(sourceAccountID, to: destinationAccountID)
+                                model.moveAccount(sourceAccountID, to: destinationAccountID, persist: false)
+                            },
+                            onCommit: {
+                                model.persistAccountOrder()
                             }
                         )
                     )
+                    .zIndex(draggedAccountID == account.id ? 1 : 0)
                     .contextMenu {
                         Button(account.isActive ? L10n.tr("当前正在使用") : L10n.tr("切换到此账号")) {
                             Task { @MainActor in await model.switchToAccount(account) }
@@ -239,6 +232,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.88), value: model.accounts.map(\.id))
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -514,14 +508,6 @@ struct ContentView: View {
         model.openReauthorize(for: accountID)
         presentWindow(id: "add-account")
     }
-
-    private func shouldShowReorderHandle(for accountID: UUID) -> Bool {
-        hoveredAccountID == accountID || draggedAccountID == accountID
-    }
-
-    private func reorderHandleOpacity(for accountID: UUID) -> Double {
-        shouldShowReorderHandle(for: accountID) ? 0.82 : 0
-    }
 }
 
 private struct AccountPlatformBadge: View {
@@ -553,9 +539,9 @@ private struct AccountListRow: View {
     let isSelected: Bool
     let isDropTarget: Bool
     let isHovering: Bool
+    let isDragging: Bool
     // 输入：刷新任务命中当前账号时，列表行改为即时 loading 状态。
     let isRefreshingStatus: Bool
-    let showsReorderHandle: Bool
 
     @State private var isHoveringFailureIcon = false
 
@@ -587,7 +573,7 @@ private struct AccountListRow: View {
             statusContent
         }
         .padding(.leading, 12)
-        .padding(.trailing, showsReorderHandle ? 30 : 12)
+        .padding(.trailing, 12)
         .padding(.vertical, 11)
         .background(backgroundColor, in: RoundedRectangle(cornerRadius: OrbitRadius.panel, style: .continuous))
         .overlay(
@@ -603,9 +589,18 @@ private struct AccountListRow: View {
                     .transition(.opacity)
             }
         }
+        .scaleEffect(isDragging ? 0.985 : 1)
+        .opacity(isDragging ? 0.82 : 1)
+        .shadow(
+            color: isDragging ? OrbitPalette.accent.opacity(0.12) : Color.clear,
+            radius: isDragging ? 8 : 0,
+            x: 0,
+            y: isDragging ? 3 : 0
+        )
         .animation(.easeOut(duration: 0.14), value: isSelected)
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .animation(.easeOut(duration: 0.12), value: isRefreshingStatus)
+        .animation(.interactiveSpring(response: 0.2, dampingFraction: 0.86), value: isDragging)
     }
 
     private var accountSubtitle: String {
@@ -743,6 +738,9 @@ private struct AccountListRow: View {
     }
 
     private var backgroundColor: Color {
+        if isDragging {
+            return OrbitPalette.floatingPanelHover
+        }
         if isDropTarget {
             return OrbitPalette.accentStrong
         }
@@ -762,6 +760,9 @@ private struct AccountListRow: View {
     }
 
     private var borderColor: Color {
+        if isDragging {
+            return OrbitPalette.accent.opacity(0.22)
+        }
         if isDropTarget {
             return OrbitPalette.accent.opacity(0.4)
         }
@@ -918,6 +919,7 @@ private struct AccountListReorderDropDelegate: DropDelegate {
     @Binding var draggedAccountID: UUID?
     @Binding var dropTargetAccountID: UUID?
     let onMove: (UUID, UUID) -> Void
+    let onCommit: () -> Void
 
     func validateDrop(info: DropInfo) -> Bool {
         draggedAccountID != nil
@@ -925,14 +927,23 @@ private struct AccountListReorderDropDelegate: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         guard let draggedAccountID, draggedAccountID != destinationAccountID else { return }
+        guard dropTargetAccountID != destinationAccountID else { return }
         dropTargetAccountID = destinationAccountID
+        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
+            onMove(draggedAccountID, destinationAccountID)
+        }
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         guard let draggedAccountID, draggedAccountID != destinationAccountID else {
             return DropProposal(operation: .cancel)
         }
-        dropTargetAccountID = destinationAccountID
+        if dropTargetAccountID != destinationAccountID {
+            dropTargetAccountID = destinationAccountID
+            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
+                onMove(draggedAccountID, destinationAccountID)
+            }
+        }
         return DropProposal(operation: .move)
     }
 
@@ -948,11 +959,16 @@ private struct AccountListReorderDropDelegate: DropDelegate {
             dropTargetAccountID = nil
         }
 
-        guard let draggedAccountID, draggedAccountID != destinationAccountID else {
+        guard let draggedAccountID else {
             return false
         }
 
-        onMove(draggedAccountID, destinationAccountID)
+        if draggedAccountID != destinationAccountID, dropTargetAccountID != destinationAccountID {
+            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
+                onMove(draggedAccountID, destinationAccountID)
+            }
+        }
+        onCommit()
         return true
     }
 }

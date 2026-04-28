@@ -679,8 +679,14 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func moveAccount(_ accountID: UUID, to destinationAccountID: UUID) {
+    // 输入：accountID 为被拖拽账号，destinationAccountID 为目标账号；拖拽过程中可延迟持久化，落点确认后再统一写入。
+    func moveAccount(_ accountID: UUID, to destinationAccountID: UUID, persist: Bool = true) {
         database.moveAccount(id: accountID, to: destinationAccountID)
+        guard persist else { return }
+        persistAccountOrder()
+    }
+
+    func persistAccountOrder() {
         Task {
             try? await persistDatabase()
         }
