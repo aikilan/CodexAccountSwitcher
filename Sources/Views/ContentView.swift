@@ -19,6 +19,13 @@ private struct AccountDragSession {
     var previewOrder: [UUID]
 }
 
+private extension Date {
+    // 输出：续期日期固定展示为 yyyy-MM-dd，避免随系统语言切换成中文年月日。
+    var subscriptionRenewalDateText: String {
+        formatted(Date.ISO8601FormatStyle(timeZone: TimeZone.current).year().month().day())
+    }
+}
+
 @MainActor
 struct ContentView: View {
     @ObservedObject var model: AppViewModel
@@ -807,7 +814,7 @@ private struct AccountListRow: View {
         else {
             return nil
         }
-        return L10n.tr("续期 %@", currentPeriodEndsAt.formatted(date: .abbreviated, time: .omitted))
+        return L10n.tr("续期 %@", currentPeriodEndsAt.subscriptionRenewalDateText)
     }
 
     private func statusSummaryWithSubscriptionRenewal(_ summary: String) -> String {
@@ -1264,7 +1271,7 @@ private struct AccountDetailView: View {
         else {
             return nil
         }
-        return currentPeriodEndsAt.formatted(date: .abbreviated, time: .omitted)
+        return currentPeriodEndsAt.subscriptionRenewalDateText
     }
 
     private func inspectorRow(_ label: String, _ value: String) -> some View {
