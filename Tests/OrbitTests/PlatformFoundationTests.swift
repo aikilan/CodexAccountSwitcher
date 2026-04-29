@@ -104,6 +104,23 @@ final class PlatformFoundationTests: XCTestCase {
         )
     }
 
+    func testSupportsResponsesAPIDetectsMiMoAsChatCompletionsOnly() {
+        XCTAssertFalse(
+            ProviderCatalog.supportsResponsesAPI(
+                presetID: ProviderCatalog.customPresetID,
+                baseURL: "https://api.xiaomimimo.com/v1"
+            )
+        )
+        XCTAssertFalse(
+            ProviderCatalog.supportsResponsesAPI(
+                presetID: ProviderCatalog.customPresetID,
+                baseURL: "https://token-plan-cn.xiaomimimo.com/v1"
+            )
+        )
+        XCTAssertTrue(isMiMoAPIHost("https://api.xiaomimimo.com/v1"))
+        XCTAssertTrue(isMiMoAPIHost("https://token-plan-cn.xiaomimimo.com/v1"))
+    }
+
     func testAccountListBadgeTitleUsesPresetDisplayNameForPresetProviderAccount() {
         let account = ManagedAccount(
             id: UUID(),

@@ -286,7 +286,14 @@ enum ProviderCatalog {
         let host = URL(string: trimmedBaseURL)?.host?.lowercased()
             ?? URL(string: "https://\(trimmedBaseURL)")?.host?.lowercased()
         switch host {
-        case "api.deepseek.com", "api.minimax.io", "api.minimaxi.com", "api.moonshot.cn", "api.z.ai", "open.bigmodel.cn":
+        case "api.deepseek.com",
+             "api.minimax.io",
+             "api.minimaxi.com",
+             "api.moonshot.cn",
+             "api.xiaomimimo.com",
+             "token-plan-cn.xiaomimimo.com",
+             "api.z.ai",
+             "open.bigmodel.cn":
             return false
         default:
             return true
@@ -333,6 +340,20 @@ func isMiniMaxAPIHost(_ baseURL: String) -> Bool {
         ?? URL(string: "https://\(trimmedBaseURL)")
     let host = rawURL?.host?.lowercased()
     return host == "api.minimax.io" || host == "api.minimaxi.com"
+}
+
+func isMiMoAPIHost(_ baseURL: String) -> Bool {
+    let trimmedBaseURL = baseURL
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    guard !trimmedBaseURL.isEmpty else {
+        return false
+    }
+
+    let rawURL = URL(string: trimmedBaseURL)
+        ?? URL(string: "https://\(trimmedBaseURL)")
+    let host = rawURL?.host?.lowercased()
+    return host == "api.xiaomimimo.com" || host == "token-plan-cn.xiaomimimo.com"
 }
 
 func normalizedMiniMaxAnthropicBaseURL(_ baseURL: String, includeVersion: Bool) -> String? {

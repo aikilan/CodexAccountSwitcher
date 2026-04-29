@@ -1,6 +1,11 @@
 import Foundation
 
 enum ResponsesChatCompletionsBridge {
+    private struct TextToolCall {
+        let name: String
+        let arguments: String
+    }
+
     enum TranslationError: LocalizedError {
         case invalidRequest(String)
         case invalidResponse(String)
@@ -19,6 +24,8 @@ enum ResponsesChatCompletionsBridge {
         from data: Data,
         fallbackModel: String,
         requiresNonEmptyToolParameters: Bool = false,
+        usesMaxCompletionTokens: Bool = false,
+        supportsParallelToolCalls: Bool = true,
         usesMiniMaxReasoning: Bool = false,
         usesDeepSeekReasoning: Bool = false
     ) throws -> Data {
@@ -30,6 +37,8 @@ enum ResponsesChatCompletionsBridge {
             from: request,
             fallbackModel: fallbackModel,
             requiresNonEmptyToolParameters: requiresNonEmptyToolParameters,
+            usesMaxCompletionTokens: usesMaxCompletionTokens,
+            supportsParallelToolCalls: supportsParallelToolCalls,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
             usesDeepSeekReasoning: usesDeepSeekReasoning
         )
@@ -442,6 +451,8 @@ enum ResponsesChatCompletionsBridge {
         from request: [String: Any],
         fallbackModel: String,
         requiresNonEmptyToolParameters: Bool,
+        usesMaxCompletionTokens: Bool,
+        supportsParallelToolCalls: Bool,
         usesMiniMaxReasoning: Bool,
         usesDeepSeekReasoning: Bool
     ) throws -> [String: Any] {
@@ -470,9 +481,9 @@ enum ResponsesChatCompletionsBridge {
             body["tool_choice"] = toolChoice
         }
         if let maxTokens = intValue(request["max_output_tokens"] ?? request["max_tokens"]) {
-            body["max_tokens"] = maxTokens
+            body[usesMaxCompletionTokens ? "max_completion_tokens" : "max_tokens"] = maxTokens
         }
-        if let parallelToolCalls = request["parallel_tool_calls"] as? Bool {
+        if supportsParallelToolCalls, let parallelToolCalls = request["parallel_tool_calls"] as? Bool {
             body["parallel_tool_calls"] = usesMiniMaxReasoning ? false : parallelToolCalls
         }
         if let temperature = doubleValue(request["temperature"]) {
@@ -984,9 +995,15 @@ enum ResponsesChatCompletionsBridge {
             throw TranslationError.invalidResponse(L10n.tr("上游 Chat Completions 缺少 choices。"))
         }
 
+        let textToolExtraction = extractTextToolCalls(from: message["content"])
+        var normalizedMessage = message
+        if !textToolExtraction.toolCalls.isEmpty {
+            normalizedMessage["content"] = textToolExtraction.content
+        }
+
         var output = [[String: Any]]()
         let normalizedOutput = normalizedOutput(
-            from: message,
+            from: normalizedMessage,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
             usesDeepSeekReasoning: usesDeepSeekReasoning
         )
@@ -1025,6 +1042,17 @@ enum ResponsesChatCompletionsBridge {
                 "arguments": trimmedString(function["arguments"]) ?? "{}",
             ])
         }
+        for toolCall in textToolExtraction.toolCalls {
+            let callID = "call_\(UUID().uuidString)"
+            output.append([
+                "id": "fc_\(UUID().uuidString)",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": callID,
+                "name": toolCall.name,
+                "arguments": toolCall.arguments,
+            ])
+        }
 
         if output.isEmpty {
             output.append([
@@ -1055,6 +1083,101 @@ enum ResponsesChatCompletionsBridge {
                 "total_tokens": totalTokens,
             ],
         ]
+    }
+
+    // 兼容把工具调用降级成文本标签返回的 OpenAI-compatible 上游。
+    private static func extractTextToolCalls(from content: Any?) -> (content: Any?, toolCalls: [TextToolCall]) {
+        switch content {
+        case let text as String:
+            let extracted = extractTextToolCalls(fromText: text)
+            return (extracted.text, extracted.toolCalls)
+        case let items as [Any]:
+            var rewrittenItems = [Any]()
+            var toolCalls = [TextToolCall]()
+            for itemValue in items {
+                guard
+                    var item = itemValue as? [String: Any],
+                    let type = trimmedString(item["type"]),
+                    type == "text" || type == "output_text",
+                    let text = item["text"] as? String
+                else {
+                    rewrittenItems.append(itemValue)
+                    continue
+                }
+
+                let extracted = extractTextToolCalls(fromText: text)
+                toolCalls.append(contentsOf: extracted.toolCalls)
+                item["text"] = extracted.text
+                rewrittenItems.append(item)
+            }
+            return (rewrittenItems, toolCalls)
+        default:
+            return (content, [])
+        }
+    }
+
+    private static func extractTextToolCalls(fromText text: String) -> (text: String, toolCalls: [TextToolCall]) {
+        guard text.contains("<tool_call>"), text.contains("</tool_call>") else {
+            return (text, [])
+        }
+        guard
+            let blockRegex = try? NSRegularExpression(
+                pattern: #"<tool_call>\s*<function=([A-Za-z0-9_.-]+)>\s*(.*?)\s*</function>\s*</tool_call>"#,
+                options: [.dotMatchesLineSeparators]
+            ),
+            let parameterRegex = try? NSRegularExpression(
+                pattern: #"<parameter=([A-Za-z0-9_.-]+)>(.*?)</parameter>"#,
+                options: [.dotMatchesLineSeparators]
+            )
+        else {
+            return (text, [])
+        }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let matches = blockRegex.matches(in: text, options: [], range: fullRange)
+        guard !matches.isEmpty else {
+            return (text, [])
+        }
+
+        var toolCalls = [TextToolCall]()
+        for match in matches {
+            guard match.numberOfRanges >= 3 else { continue }
+            let functionName = nsText.substring(with: match.range(at: 1))
+            let parameterSource = nsText.substring(with: match.range(at: 2))
+            let nsParameterSource = parameterSource as NSString
+            let parameterMatches = parameterRegex.matches(
+                in: parameterSource,
+                options: [],
+                range: NSRange(location: 0, length: nsParameterSource.length)
+            )
+            let parameters = parameterMatches.reduce(into: [String: Any]()) { result, parameterMatch in
+                guard parameterMatch.numberOfRanges >= 3 else { return }
+                let name = nsParameterSource.substring(with: parameterMatch.range(at: 1))
+                let value = nsParameterSource.substring(with: parameterMatch.range(at: 2))
+                result[name] = value
+            }
+            guard !parameters.isEmpty else { continue }
+            toolCalls.append(
+                TextToolCall(
+                    name: functionName,
+                    arguments: jsonString(from: parameters) ?? "{}"
+                )
+            )
+        }
+
+        guard !toolCalls.isEmpty else {
+            return (text, [])
+        }
+
+        let strippedText = blockRegex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: fullRange,
+            withTemplate: ""
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (strippedText, toolCalls)
     }
 
     private static func normalizedOutput(

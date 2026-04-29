@@ -293,13 +293,16 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
             let requestObject = try requestJSONObject(from: request.body)
             let wantsStream = (requestObject["stream"] as? Bool) ?? false
             let usesMiniMaxReasoning = isMiniMaxAPIHost(state.baseURL)
-            let usesDeepSeekReasoning = isDeepSeekAPIHost(state.baseURL)
+            let usesMiMoCompatibility = isMiMoAPIHost(state.baseURL)
+            let usesReasoningContent = isDeepSeekAPIHost(state.baseURL) || usesMiMoCompatibility
             let upstreamRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
                 from: request.body,
                 fallbackModel: state.defaultModel,
                 requiresNonEmptyToolParameters: usesMiniMaxReasoning,
+                usesMaxCompletionTokens: usesMiMoCompatibility,
+                supportsParallelToolCalls: !usesMiMoCompatibility,
                 usesMiniMaxReasoning: usesMiniMaxReasoning,
-                usesDeepSeekReasoning: usesDeepSeekReasoning
+                usesDeepSeekReasoning: usesReasoningContent
             )
             let parameterizedUpstreamRequest = try ProviderModelSettings.applyParameters(
                 toJSONData: upstreamRequest,
@@ -324,7 +327,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                 from: data,
                 fallbackModel: state.defaultModel,
                 usesMiniMaxReasoning: usesMiniMaxReasoning,
-                usesDeepSeekReasoning: usesDeepSeekReasoning
+                usesDeepSeekReasoning: usesReasoningContent
             )
             guard let responseObject = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
                 throw ResponsesChatCompletionsBridge.TranslationError.invalidResponse(L10n.tr("本地桥接响应格式无效。"))

@@ -143,11 +143,16 @@ private func defaultCodexOAuthClaudeBridgeUpstreamRequest(
         let requestObject = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
         let fallbackModel = CodexOAuthClaudeBridgeServer.trimmedString(requestObject?["model"]) ?? "gpt-5.4"
         let usesMiniMaxReasoning = isMiniMaxAPIHost(trimmedBaseURL)
+        let usesMiMoCompatibility = isMiMoAPIHost(trimmedBaseURL)
+        let usesReasoningContent = usesMiMoCompatibility
         let chatRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
             from: body,
             fallbackModel: fallbackModel,
             requiresNonEmptyToolParameters: usesMiniMaxReasoning,
-            usesMiniMaxReasoning: usesMiniMaxReasoning
+            usesMaxCompletionTokens: usesMiMoCompatibility,
+            supportsParallelToolCalls: !usesMiMoCompatibility,
+            usesMiniMaxReasoning: usesMiniMaxReasoning,
+            usesDeepSeekReasoning: usesReasoningContent
         )
         var request = URLRequest(url: URL(string: "\(trimmedBaseURL)/chat/completions")!)
         request.httpMethod = "POST"
@@ -164,7 +169,8 @@ private func defaultCodexOAuthClaudeBridgeUpstreamRequest(
         let bridgedData = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
             from: data,
             fallbackModel: fallbackModel,
-            usesMiniMaxReasoning: usesMiniMaxReasoning
+            usesMiniMaxReasoning: usesMiniMaxReasoning,
+            usesDeepSeekReasoning: usesReasoningContent
         )
         return CodexOAuthClaudeBridgeUpstreamResponse(statusCode: statusCode, body: bridgedData)
     }

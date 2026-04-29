@@ -329,6 +329,120 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertEqual(firstAssistant["reasoning_content"] as? String, "先检查上一次工具输出，再继续。")
     }
 
+    func testMiMoBridgeUsesMaxCompletionTokensAndPreservesReasoningContent() async throws {
+        actor Recorder {
+            var lastRequestBody: Data?
+
+            func store(_ data: Data) {
+                lastRequestBody = data
+            }
+
+            func body() -> Data? {
+                lastRequestBody
+            }
+        }
+
+        let recorder = Recorder()
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_mimo_reasoning",
+            "model": "mimo-v2.5-pro",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "reasoning_content": "先复用上一轮工具调用推理。",
+                        "content": "继续处理。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 8,
+                "completion_tokens": 4,
+                "total_tokens": 12,
+            ],
+        ])
+
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, body in
+                await recorder.store(body)
+                return (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.xiaomimimo.com/v1",
+            apiKeyEnvName: "MIMO_API_KEY",
+            apiKey: "sk-mimo-test",
+            model: "mimo-v2.5-pro",
+            availableModels: ["mimo-v2.5-pro"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "mimo-v2.5-pro",
+            "stream": false,
+            "max_output_tokens": 1024,
+            "parallel_tool_calls": true,
+            "input": [
+                [
+                    "type": "reasoning",
+                    "summary": [
+                        [
+                            "type": "summary_text",
+                            "text": "上一轮已经判断需要调用工具。",
+                        ],
+                    ],
+                ],
+                [
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        [
+                            "type": "output_text",
+                            "text": "我会继续执行。",
+                        ],
+                    ],
+                ],
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "input_text",
+                            "text": "继续。",
+                        ],
+                    ],
+                ],
+            ],
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let responseObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let output = try XCTUnwrap(responseObject["output"] as? [[String: Any]])
+        let recordedBody = await recorder.body()
+        let upstreamBody = try XCTUnwrap(recordedBody)
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamBody) as? [String: Any])
+        let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+        let assistantMessage = try XCTUnwrap(upstreamMessages.first(where: { ($0["role"] as? String) == "assistant" }))
+        let assistantOutput = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "message" }))
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(upstreamRequestObject["max_completion_tokens"] as? Int, 1024)
+        XCTAssertNil(upstreamRequestObject["max_tokens"])
+        XCTAssertNil(upstreamRequestObject["parallel_tool_calls"])
+        XCTAssertEqual(assistantMessage["reasoning_content"] as? String, "上一轮已经判断需要调用工具。")
+        XCTAssertEqual(assistantOutput["reasoning_content"] as? String, "先复用上一轮工具调用推理。")
+    }
+
     func testBridgeStreamsCodexCompatibleResponsesEvents() async throws {
         let upstreamResponse = try JSONSerialization.data(withJSONObject: [
             "id": "chatcmpl_stream_test",

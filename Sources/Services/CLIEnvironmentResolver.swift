@@ -597,7 +597,7 @@ struct CLIEnvironmentResolver: @unchecked Sendable {
             modelCatalogSnapshot: shouldManageModelCatalog
                 ? ResolvedCodexModelCatalogSnapshot(
                     availableModels: availableModels,
-                    supportsParallelToolCalls: !isMiniMaxAPIHost(provider.baseURL)
+                    supportsParallelToolCalls: !isMiniMaxAPIHost(provider.baseURL) && !isMiMoAPIHost(provider.baseURL)
                 )
                 : nil,
             configFileContents: codexConfigContents(

@@ -462,6 +462,39 @@ final class CLIEnvironmentResolverTests: XCTestCase {
         XCTAssertEqual(context.modelCatalogSnapshot?.availableModels, ["custom-model"])
     }
 
+    func testResolveCodexContextDisablesParallelToolCallsForMiMoProvider() async throws {
+        let resolver = CLIEnvironmentResolver(session: makeSession())
+        let paths = try makePaths()
+        let account = makeProviderAccount(
+            platform: .codex,
+            rule: .openAICompatible,
+            presetID: ProviderCatalog.customPresetID,
+            baseURL: "https://api.xiaomimimo.com/v1",
+            envName: "MIMO_API_KEY",
+            model: "mimo-v2.5-pro"
+        )
+
+        let context = try await resolver.resolveCodexContext(
+            for: account,
+            workingDirectoryURL: FileManager.default.temporaryDirectory,
+            appPaths: paths,
+            authPayload: nil,
+            providerAPIKeyCredential: try ProviderAPIKeyCredential(apiKey: "sk-mimo-test").validated(),
+            copilotCredential: nil,
+            copilotResponsesBridgeManager: ResolverCopilotResponsesBridgeManager(),
+            openAICompatibleProviderCodexBridgeManager: ResolverOpenAICompatibleProviderBridgeManager(),
+            claudeProviderCodexBridgeManager: RecordingResolverClaudeProviderBridgeManager()
+        )
+
+        XCTAssertEqual(
+            context.modelCatalogSnapshot,
+            ResolvedCodexModelCatalogSnapshot(
+                availableModels: ["mimo-v2.5-pro"],
+                supportsParallelToolCalls: false
+            )
+        )
+    }
+
     func testResolveClaudeContextSkipsPrefetchForCustomClaudeProvider() async throws {
         ResolverMockURLProtocol.requestHandler = { _ in
             XCTFail("custom provider 不应该触发模型预查询")

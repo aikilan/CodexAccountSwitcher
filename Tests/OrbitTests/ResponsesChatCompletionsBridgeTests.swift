@@ -156,6 +156,73 @@ final class ResponsesChatCompletionsBridgeTests: XCTestCase {
         XCTAssertTrue(text.contains("event: response.completed"))
     }
 
+    func testMakeResponsesResponseDataExtractsTextToolCallBlocks() throws {
+        let patch = """
+        *** Begin Patch
+        *** Update File: src/modules/bd-ai-import-questions/components/actions-bar/index.module.less
+        @@
+        -.wrapper {
+        -}
+        +.wrapper {
+        +    width: 100%;
+        +}
+        *** End Patch
+        """
+        let upstreamResponse: [String: Any] = [
+            "id": "chatcmpl_text_tool",
+            "model": "custom-openai-compatible",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "content": """
+                        样式文件是空的，需要补上。
+                        <tool_call>
+                        <function=apply_patch>
+                        <parameter=patch>\(patch)</parameter>
+                        </function>
+                        </tool_call>
+                        """,
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+            "usage": [
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+            ],
+        ]
+
+        let upstreamData = try JSONSerialization.data(withJSONObject: upstreamResponse)
+        let responseData = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
+            from: upstreamData,
+            fallbackModel: "custom-openai-compatible"
+        )
+        let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+        let message = try XCTUnwrap(output.first)
+        let content = try XCTUnwrap(message["content"] as? [[String: Any]])
+        let toolCall = try XCTUnwrap(output.last)
+        let arguments = try XCTUnwrap(toolCall["arguments"] as? String)
+        let argumentObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any])
+
+        XCTAssertEqual(output.count, 2)
+        XCTAssertEqual(message["type"] as? String, "message")
+        XCTAssertEqual(content.first?["text"] as? String, "样式文件是空的，需要补上。")
+        XCTAssertEqual(toolCall["type"] as? String, "function_call")
+        XCTAssertEqual(toolCall["name"] as? String, "apply_patch")
+        XCTAssertEqual(argumentObject["patch"] as? String, patch)
+
+        let streamText = try XCTUnwrap(
+            String(data: ResponsesChatCompletionsBridge.makeResponseStreamData(from: response), encoding: .utf8)
+        )
+        XCTAssertTrue(streamText.contains("event: response.function_call_arguments.done"))
+        XCTAssertTrue(streamText.contains("apply_patch"))
+        XCTAssertFalse(streamText.contains("<tool_call>"))
+    }
+
     private func acpUpdate(sessionUpdate: String, content: String) throws -> Data {
         try acpUpdate([
             "sessionUpdate": sessionUpdate,
