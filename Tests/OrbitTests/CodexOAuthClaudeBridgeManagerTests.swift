@@ -465,7 +465,8 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
                 supportsResponsesAPI: false
             ),
             model: "MiniMax-M2.7",
-            availableModels: ["MiniMax-M2.7"]
+            availableModels: ["MiniMax-M2.7"],
+            modelSettings: [ProviderModelSettings(model: "MiniMax-M2.7", temperature: 0.65, topP: 0.75)]
         )
 
         var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/messages")))
@@ -495,6 +496,8 @@ final class CodexOAuthClaudeBridgeManagerTests: XCTestCase {
         let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamRequestBody) as? [String: Any])
 
         XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(upstreamRequestObject["temperature"] as? Double, 0.65)
+        XCTAssertEqual(upstreamRequestObject["top_p"] as? Double, 0.75)
         XCTAssertEqual(upstreamRequestObject["reasoning_split"] as? Bool, true)
         XCTAssertEqual(upstreamRequestObject["parallel_tool_calls"] as? Bool, false)
         XCTAssertEqual(content.first?["type"] as? String, "text")

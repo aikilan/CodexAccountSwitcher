@@ -222,7 +222,8 @@ private struct NoopCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeManaging
         accountID: UUID,
         source: OpenAICompatibleClaudeBridgeSource,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedCodexOAuthClaudeBridge {
         PreparedCodexOAuthClaudeBridge(
             baseURL: "http://127.0.0.1:18080",
@@ -280,7 +281,8 @@ private struct NoopOpenAICompatibleProviderCodexBridgeManager: OpenAICompatibleP
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedOpenAICompatibleProviderCodexBridge {
         PreparedOpenAICompatibleProviderCodexBridge(
             baseURL: "http://127.0.0.1:18082",
@@ -297,12 +299,31 @@ private struct NoopClaudeProviderCodexBridgeManager: ClaudeProviderCodexBridgeMa
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedClaudeProviderCodexBridge {
         PreparedClaudeProviderCodexBridge(
             baseURL: "http://127.0.0.1:18081",
             apiKeyEnvName: "OPENAI_API_KEY",
             apiKey: "claude-provider-bridge"
+        )
+    }
+}
+
+private struct NoopClaudeCompatibleProviderProxyManager: ClaudeCompatibleProviderProxyManaging {
+    func prepareProxy(
+        accountID: UUID,
+        baseURL: String,
+        apiKeyEnvName: String,
+        apiKey: String,
+        model: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) async throws -> PreparedClaudeCompatibleProviderProxy {
+        PreparedClaudeCompatibleProviderProxy(
+            baseURL: "http://127.0.0.1:18084",
+            apiKeyEnvName: "ANTHROPIC_API_KEY",
+            apiKey: "claude-compatible-provider-proxy"
         )
     }
 }
@@ -337,6 +358,7 @@ extension AppViewModel {
         copilotSessionImporter: (any CopilotSessionQueueImporting)? = nil,
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = NoopOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = NoopClaudeProviderCodexBridgeManager(),
+        claudeCompatibleProviderProxyManager: any ClaudeCompatibleProviderProxyManaging = NoopClaudeCompatibleProviderProxyManager(),
         bannerAutoDismissDuration: Duration = .seconds(10),
         codexSubscriptionQuotaAutoRefreshInterval: Duration? = nil
     ) {
@@ -371,6 +393,7 @@ extension AppViewModel {
             copilotSessionImporter: copilotSessionImporter,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
+            claudeCompatibleProviderProxyManager: claudeCompatibleProviderProxyManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration,
             codexSubscriptionQuotaAutoRefreshInterval: codexSubscriptionQuotaAutoRefreshInterval
         )

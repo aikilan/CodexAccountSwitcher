@@ -33,7 +33,11 @@ final class ClaudeCLILauncherTests: XCTestCase {
                     modelProvider: "openrouter",
                     baseURL: "https://proxy.example/v1",
                     apiKeyEnvName: "ANTHROPIC_API_KEY",
-                    availableModels: ["deepseek-chat", "deepseek-reasoner"]
+                    availableModels: ["deepseek-chat", "deepseek-reasoner"],
+                    modelSettings: [
+                        ProviderModelSettings(model: "deepseek-chat", temperature: 0.2, topP: 0.9),
+                        ProviderModelSettings(model: "deepseek-reasoner", temperature: 0.1, topP: 0.85),
+                    ]
                 ),
                 environmentVariables: [
                     "ANTHROPIC_API_KEY": "sk-ant-test",
@@ -59,6 +63,11 @@ final class ClaudeCLILauncherTests: XCTestCase {
 
         XCTAssertEqual(object["model"] as? String, "claude-sonnet-4.5")
         XCTAssertEqual(object["availableModels"] as? [String], ["deepseek-chat", "deepseek-reasoner", "claude-sonnet-4.5"])
+        let modelSettings = try XCTUnwrap(object["modelSettings"] as? [[String: Any]])
+        XCTAssertEqual(modelSettings.count, 3)
+        XCTAssertEqual(modelSettings.first?["model"] as? String, "deepseek-chat")
+        XCTAssertEqual(modelSettings.first?["temperature"] as? Double, 0.2)
+        XCTAssertEqual(modelSettings.first?["top_p"] as? Double, 0.9)
     }
 
     func testLaunchCLIUsesResolvedExecutableWhenOverrideIsNil() throws {

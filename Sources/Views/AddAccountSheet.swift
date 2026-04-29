@@ -227,8 +227,7 @@ struct AddAccountSheet: View {
             TextField(L10n.tr("供应商名称"), text: $model.addAccountProviderDisplayName)
                 .textFieldStyle(.roundedBorder)
 
-            TextField(L10n.tr("默认模型"), text: $model.addAccountDefaultModel)
-                .textFieldStyle(.roundedBorder)
+            providerModelSettingsSection
 
             SecureField(model.addAccountAPIKeyPlaceholder, text: $model.apiKeyInput)
                 .textFieldStyle(.roundedBorder)
@@ -254,6 +253,100 @@ struct AddAccountSheet: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .orbitSurface(.neutral, radius: OrbitRadius.hero)
+    }
+
+    private var providerModelSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.tr("模型与参数"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button {
+                    model.addProviderModelSettingRow()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.bordered)
+                .help(L10n.tr("新增模型"))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(model.addAccountProviderModelSettings.indices, id: \.self) { index in
+                    HStack(spacing: 8) {
+                        Button {
+                            model.selectDefaultProviderModel(model.addAccountProviderModelSettings[index].model)
+                        } label: {
+                            Image(systemName: isDefaultProviderModel(at: index) ? "checkmark.circle.fill" : "circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.tr("设为默认模型"))
+
+                        TextField(
+                            L10n.tr("模型"),
+                            text: Binding(
+                                get: { model.addAccountProviderModelSettings[index].model },
+                                set: { model.updateProviderModelName(at: index, model: $0) }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 220)
+
+                        TextField(
+                            "temperature",
+                            value: Binding(
+                                get: { model.addAccountProviderModelSettings[index].temperature },
+                                set: { model.updateProviderModelTemperature(at: index, temperature: $0) }
+                            ),
+                            formatter: providerParameterFormatter
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 110)
+
+                        TextField(
+                            "top_p",
+                            value: Binding(
+                                get: { model.addAccountProviderModelSettings[index].topP },
+                                set: { model.updateProviderModelTopP(at: index, topP: $0) }
+                            ),
+                            formatter: providerParameterFormatter
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+
+                        Button(role: .destructive) {
+                            model.removeProviderModelSetting(at: index)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.tr("删除模型"))
+                    }
+                }
+            }
+
+            Text(L10n.tr("默认 temperature = 0.3，top_p = 0.95；启动时会按所选模型写入请求参数。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var providerParameterFormatter: NumberFormatter {
+        let formatter = NumberFormatter()
+        formatter.minimum = NSNumber(value: 0)
+        formatter.maximumFractionDigits = 3
+        formatter.minimumFractionDigits = 0
+        formatter.numberStyle = .decimal
+        return formatter
+    }
+
+    private func isDefaultProviderModel(at index: Int) -> Bool {
+        guard model.addAccountProviderModelSettings.indices.contains(index) else {
+            return false
+        }
+        return model.addAccountDefaultModel == model.addAccountProviderModelSettings[index].model
     }
 
     private var claudeProfileSection: some View {

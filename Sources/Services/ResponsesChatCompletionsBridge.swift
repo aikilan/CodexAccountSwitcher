@@ -475,6 +475,12 @@ enum ResponsesChatCompletionsBridge {
         if let parallelToolCalls = request["parallel_tool_calls"] as? Bool {
             body["parallel_tool_calls"] = usesMiniMaxReasoning ? false : parallelToolCalls
         }
+        if let temperature = doubleValue(request["temperature"]) {
+            body["temperature"] = temperature
+        }
+        if let topP = doubleValue(request["top_p"]) {
+            body["top_p"] = topP
+        }
         if usesMiniMaxReasoning {
             body["reasoning_split"] = true
         }
@@ -1222,6 +1228,19 @@ enum ResponsesChatCompletionsBridge {
             return number.intValue
         case let string as String:
             return Int(string)
+        default:
+            return nil
+        }
+    }
+
+    private static func doubleValue(_ value: Any?) -> Double? {
+        switch value {
+        case let number as Double:
+            return number
+        case let number as NSNumber:
+            return number.doubleValue
+        case let string as String:
+            return Double(string)
         default:
             return nil
         }

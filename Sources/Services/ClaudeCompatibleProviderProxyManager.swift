@@ -1,53 +1,49 @@
 import Foundation
 import Network
 
-enum OpenAICompatibleProviderCodexBridgeManagerError: LocalizedError, Equatable {
-    case bridgeStartFailed
+enum ClaudeCompatibleProviderProxyManagerError: LocalizedError, Equatable {
+    case proxyStartFailed
     case invalidProvider
 
     var errorDescription: String? {
         switch self {
-        case .bridgeStartFailed:
-            return L10n.tr("OpenAI 兼容 Provider 到 Codex 的本地桥接启动失败。")
+        case .proxyStartFailed:
+            return L10n.tr("Claude Provider 本地代理启动失败。")
         case .invalidProvider:
-            return L10n.tr("OpenAI 兼容 Provider 配置不完整。")
+            return L10n.tr("Claude Provider 配置不完整。")
         }
     }
 }
 
-actor OpenAICompatibleProviderCodexBridgeManager {
-    private let sendUpstreamRequest: @Sendable (String, String, Data) async throws -> (Int, Data)
-    private var servers: [String: OpenAICompatibleProviderCodexBridgeServer] = [:]
-
-    init() {
-        self.sendUpstreamRequest = Self.sendUpstreamRequest
-    }
+actor ClaudeCompatibleProviderProxyManager {
+    private let sendUpstreamRequest: @Sendable (String, String, String, [String: String], Data) async throws -> (Int, Data)
+    private var servers: [String: ClaudeCompatibleProviderProxyServer] = [:]
 
     init(
-        sendUpstreamRequest: @escaping @Sendable (String, String, Data) async throws -> (Int, Data)
+        sendUpstreamRequest: @escaping @Sendable (String, String, String, [String: String], Data) async throws -> (Int, Data) = ClaudeCompatibleProviderProxyManager.sendUpstreamRequest
     ) {
         self.sendUpstreamRequest = sendUpstreamRequest
     }
 
-    func prepareBridge(
+    func prepareProxy(
         accountID: UUID,
         baseURL: String,
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
         availableModels: [String],
-        modelSettings: [ProviderModelSettings] = []
-    ) async throws -> PreparedOpenAICompatibleProviderCodexBridge {
+        modelSettings: [ProviderModelSettings]
+    ) async throws -> PreparedClaudeCompatibleProviderProxy {
         let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmedBaseURL.isEmpty, !trimmedAPIKey.isEmpty, !trimmedModel.isEmpty else {
-            throw OpenAICompatibleProviderCodexBridgeManagerError.invalidProvider
+            throw ClaudeCompatibleProviderProxyManagerError.invalidProvider
         }
 
         let server = servers[accountID.uuidString]
-            ?? OpenAICompatibleProviderCodexBridgeServer(sendUpstreamRequest: sendUpstreamRequest)
+            ?? ClaudeCompatibleProviderProxyServer(sendUpstreamRequest: sendUpstreamRequest)
         server.update(
             baseURL: trimmedBaseURL,
             apiKeyEnvName: apiKeyEnvName.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -59,40 +55,80 @@ actor OpenAICompatibleProviderCodexBridgeManager {
         let localBaseURL = try await server.startIfNeeded()
         servers[accountID.uuidString] = server
 
-        return PreparedOpenAICompatibleProviderCodexBridge(
+        return PreparedClaudeCompatibleProviderProxy(
             baseURL: localBaseURL,
-            apiKeyEnvName: "OPENAI_API_KEY",
-            apiKey: "openai-compatible-provider-bridge"
+            apiKeyEnvName: "ANTHROPIC_API_KEY",
+            apiKey: "claude-compatible-provider-proxy"
         )
     }
 
-    private static func sendUpstreamRequest(baseURL: String, apiKey: String, body: Data) async throws -> (Int, Data) {
-        let normalizedBaseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        let url = URL(string: "\(normalizedBaseURL)/chat/completions")!
-        var request = URLRequest(url: url)
+    private static func sendUpstreamRequest(
+        baseURL: String,
+        apiKey: String,
+        endpoint: String,
+        headers: [String: String],
+        body: Data
+    ) async throws -> (Int, Data) {
+        let requestURL = try upstreamURL(baseURL: baseURL, endpoint: endpoint)
+        var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        var hasAnthropicVersion = false
+        for (name, value) in headers where name.hasPrefix("anthropic-") && !value.isEmpty {
+            request.setValue(value, forHTTPHeaderField: name)
+            if name == "anthropic-version" {
+                hasAnthropicVersion = true
+            }
+        }
+        if !hasAnthropicVersion {
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
+
+        if normalizedMiniMaxAnthropicBaseURL(baseURL, includeVersion: false) != nil {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 500
-        return (statusCode, data)
+        return ((response as? HTTPURLResponse)?.statusCode ?? 500, data)
+    }
+
+    private static func upstreamURL(baseURL: String, endpoint: String) throws -> URL {
+        if let minimaxBaseURL = normalizedMiniMaxAnthropicBaseURL(baseURL, includeVersion: true) {
+            return try validURL("\(minimaxBaseURL)/\(endpoint)")
+        }
+        let normalizedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return try validURL("\(normalizedBaseURL)/\(endpoint)")
+    }
+
+    private static func validURL(_ value: String) throws -> URL {
+        guard let url = URL(string: value) else {
+            throw ClaudeCompatibleProviderProxyManagerError.invalidProvider
+        }
+        return url
     }
 }
 
-extension OpenAICompatibleProviderCodexBridgeManager: OpenAICompatibleProviderCodexBridgeManaging {}
+extension ClaudeCompatibleProviderProxyManager: ClaudeCompatibleProviderProxyManaging {}
 
-private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendable {
+private final class ClaudeCompatibleProviderProxyServer: @unchecked Sendable {
     private final class ResumeState: @unchecked Sendable {
         var didResume = false
     }
 
     private struct HTTPRequest {
         let method: String
-        let path: String
+        let target: String
+        let headers: [String: String]
         let body: Data
+
+        var path: String {
+            String(target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+        }
     }
 
     private struct HTTPResponse {
@@ -101,23 +137,20 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
         let body: Data
     }
 
-    private let queue = DispatchQueue(label: "com.openai.Orbit.openai-compatible-provider-bridge")
-    private let stateQueue = DispatchQueue(label: "com.openai.Orbit.openai-compatible-provider-bridge.state")
-    private let sendUpstreamRequest: @Sendable (String, String, Data) async throws -> (Int, Data)
-    private let overloadRetryDelaysNanos: [UInt64] = [200_000_000, 500_000_000]
+    private let queue = DispatchQueue(label: "com.openai.Orbit.claude-compatible-provider-proxy")
+    private let stateQueue = DispatchQueue(label: "com.openai.Orbit.claude-compatible-provider-proxy.state")
+    private let sendUpstreamRequest: @Sendable (String, String, String, [String: String], Data) async throws -> (Int, Data)
 
     private var listener: NWListener?
     private var localBaseURL: String?
     private var upstreamBaseURL = ""
-    private var apiKeyEnvName = "OPENAI_API_KEY"
+    private var apiKeyEnvName = "ANTHROPIC_API_KEY"
     private var apiKey = ""
-    private var defaultModel = "gpt-5.4"
-    private var availableModels = ["gpt-5.4"]
-    private var modelSettings = [ProviderModelSettings(model: "gpt-5.4")]
+    private var defaultModel = "claude-sonnet-4.5"
+    private var availableModels = ["claude-sonnet-4.5"]
+    private var modelSettings = [ProviderModelSettings(model: "claude-sonnet-4.5")]
 
-    init(
-        sendUpstreamRequest: @escaping @Sendable (String, String, Data) async throws -> (Int, Data)
-    ) {
+    init(sendUpstreamRequest: @escaping @Sendable (String, String, String, [String: String], Data) async throws -> (Int, Data)) {
         self.sendUpstreamRequest = sendUpstreamRequest
     }
 
@@ -131,7 +164,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
     ) {
         stateQueue.sync {
             self.upstreamBaseURL = baseURL
-            self.apiKeyEnvName = apiKeyEnvName.isEmpty ? "OPENAI_API_KEY" : apiKeyEnvName
+            self.apiKeyEnvName = apiKeyEnvName.isEmpty ? "ANTHROPIC_API_KEY" : apiKeyEnvName
             self.apiKey = apiKey
             self.defaultModel = model
             self.availableModels = normalizedAvailableModels(availableModels, fallbackModel: model)
@@ -149,7 +182,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
 
         return try await withCheckedThrowingContinuation { continuation in
             let resumeState = ResumeState()
-            let resumeQueue = DispatchQueue(label: "com.openai.Orbit.openai-compatible-provider-bridge.resume")
+            let resumeQueue = DispatchQueue(label: "com.openai.Orbit.claude-compatible-provider-proxy.resume")
 
             let resumeOnce: @Sendable (Result<String, Error>) -> Void = { result in
                 resumeQueue.sync {
@@ -169,7 +202,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                 switch state {
                 case .ready:
                     guard let port = listener.port?.rawValue else {
-                        resumeOnce(.failure(OpenAICompatibleProviderCodexBridgeManagerError.bridgeStartFailed))
+                        resumeOnce(.failure(ClaudeCompatibleProviderProxyManagerError.proxyStartFailed))
                         return
                     }
                     let localBaseURL = "http://127.0.0.1:\(port)"
@@ -178,7 +211,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                     }
                     resumeOnce(.success(localBaseURL))
                 case .failed:
-                    resumeOnce(.failure(OpenAICompatibleProviderCodexBridgeManagerError.bridgeStartFailed))
+                    resumeOnce(.failure(ClaudeCompatibleProviderProxyManagerError.proxyStartFailed))
                 default:
                     break
                 }
@@ -220,13 +253,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
             }
 
             if isComplete {
-                send(
-                    response: jsonResponse(
-                        statusCode: 400,
-                        body: errorPayload(message: L10n.tr("Codex 请求格式无效。"))
-                    ),
-                    through: connection
-                )
+                send(response: jsonResponse(statusCode: 400, body: errorPayload(message: L10n.tr("Claude 请求格式无效。"))), through: connection)
                 return
             }
 
@@ -249,7 +276,6 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
         guard let requestLine = headerLines.first else {
             return nil
         }
-
         let requestParts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
         guard requestParts.count >= 2 else {
             return nil
@@ -271,84 +297,72 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
 
         return HTTPRequest(
             method: String(requestParts[0]),
-            path: String(requestParts[1]),
+            target: String(requestParts[1]),
+            headers: headers,
             body: buffer.subdata(in: bodyStart..<(bodyStart + contentLength))
         )
     }
 
     private func response(for request: HTTPRequest) async -> HTTPResponse {
         switch (request.method, request.path) {
-        case ("POST", "/responses"), ("POST", "/v1/responses"):
-            return await responsesResponse(for: request)
+        case ("POST", "/messages"), ("POST", "/v1/messages"):
+            return await upstreamResponse(for: request, endpoint: "messages", injectModelParameters: true)
+        case ("POST", "/messages/count_tokens"), ("POST", "/v1/messages/count_tokens"):
+            return await upstreamResponse(for: request, endpoint: "messages/count_tokens", injectModelParameters: false)
         case ("GET", "/models"), ("GET", "/v1/models"):
             return jsonResponse(statusCode: 200, body: jsonData(["data": modelObjects()]))
         default:
-            return jsonResponse(statusCode: 404, body: errorPayload(message: L10n.tr("不支持的 Codex Provider 路径。")))
+            return jsonResponse(statusCode: 404, body: errorPayload(message: L10n.tr("不支持的 Claude Provider 代理路径。")))
         }
     }
 
-    private func responsesResponse(for request: HTTPRequest) async -> HTTPResponse {
+    private func upstreamResponse(
+        for request: HTTPRequest,
+        endpoint: String,
+        injectModelParameters: Bool
+    ) async -> HTTPResponse {
         do {
             let state = currentState()
-            let requestObject = try requestJSONObject(from: request.body)
-            let wantsStream = (requestObject["stream"] as? Bool) ?? false
-            let usesMiniMaxReasoning = isMiniMaxAPIHost(state.baseURL)
-            let usesDeepSeekReasoning = isDeepSeekAPIHost(state.baseURL)
-            let upstreamRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
-                from: request.body,
-                fallbackModel: state.defaultModel,
-                requiresNonEmptyToolParameters: usesMiniMaxReasoning,
-                usesMiniMaxReasoning: usesMiniMaxReasoning,
-                usesDeepSeekReasoning: usesDeepSeekReasoning
-            )
-            let parameterizedUpstreamRequest = try ProviderModelSettings.applyParameters(
-                toJSONData: upstreamRequest,
-                requestedModel: requestObject["model"] as? String,
-                settings: state.modelSettings,
-                fallbackModel: state.defaultModel
-            )
-            let (statusCode, data) = try await sendUpstreamRequestHandlingOverload(
-                baseURL: state.baseURL,
-                apiKey: state.apiKey,
-                body: parameterizedUpstreamRequest
-            )
-
-            guard (200..<300).contains(statusCode) else {
-                return jsonResponse(
-                    statusCode: statusCode,
-                    body: errorPayload(message: ResponsesChatCompletionsBridge.extractErrorMessage(from: data))
+            let body: Data
+            if injectModelParameters {
+                // Claude Code 直连 provider 时，请求体在代理边界统一补齐当前模型采样参数。
+                body = try ProviderModelSettings.applyParameters(
+                    toJSONData: request.body,
+                    requestedModel: requestModel(from: request.body),
+                    settings: state.modelSettings,
+                    fallbackModel: state.defaultModel
                 )
+            } else {
+                body = request.body
             }
-
-            let responseData = try ResponsesChatCompletionsBridge.makeResponsesResponseData(
-                from: data,
-                fallbackModel: state.defaultModel,
-                usesMiniMaxReasoning: usesMiniMaxReasoning,
-                usesDeepSeekReasoning: usesDeepSeekReasoning
+            let (statusCode, data) = try await sendUpstreamRequest(
+                state.baseURL,
+                state.apiKey,
+                endpoint,
+                request.headers,
+                body
             )
-            guard let responseObject = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
-                throw ResponsesChatCompletionsBridge.TranslationError.invalidResponse(L10n.tr("本地桥接响应格式无效。"))
-            }
-
-            if wantsStream {
-                return HTTPResponse(
-                    statusCode: 200,
-                    contentType: "text/event-stream",
-                    body: ResponsesChatCompletionsBridge.makeResponseStreamData(from: responseObject)
-                )
-            }
-
-            return jsonResponse(statusCode: 200, body: responseData)
+            let contentType = (200..<300).contains(statusCode) && requestWantsStreaming(request.body)
+                ? "text/event-stream"
+                : "application/json"
+            return HTTPResponse(statusCode: statusCode, contentType: contentType, body: data)
         } catch {
             return jsonResponse(statusCode: 502, body: errorPayload(message: error.localizedDescription))
         }
     }
 
-    private func requestJSONObject(from data: Data) throws -> [String: Any] {
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw OpenAICompatibleProviderCodexBridgeManagerError.invalidProvider
+    private func requestModel(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
         }
-        return object
+        return object["model"] as? String
+    }
+
+    private func requestWantsStreaming(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return (object["stream"] as? Bool) ?? false
     }
 
     private func currentState() -> (
@@ -362,19 +376,6 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
         stateQueue.sync {
             (upstreamBaseURL, apiKeyEnvName, apiKey, defaultModel, availableModels, modelSettings)
         }
-    }
-
-    private func sendUpstreamRequestHandlingOverload(
-        baseURL: String,
-        apiKey: String,
-        body: Data
-    ) async throws -> (Int, Data) {
-        var response = try await sendUpstreamRequest(baseURL, apiKey, body)
-        for delay in overloadRetryDelaysNanos where response.0 == 529 {
-            try await Task.sleep(nanoseconds: delay)
-            response = try await sendUpstreamRequest(baseURL, apiKey, body)
-        }
-        return response.0 == 529 ? (429, response.1) : response
     }
 
     private func send(response: HTTPResponse, through connection: NWConnection) {
@@ -412,46 +413,20 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
     private func modelObjects() -> [[String: Any]] {
         let state = currentState()
         let models = state.availableModels.isEmpty ? [state.defaultModel] : state.availableModels
-        return models.map(modelObject(for:))
-    }
-
-    private func modelObject(for model: String) -> [String: Any] {
-        return [
-            "id": model,
-            "object": "model",
-            "owned_by": "openai-compatible-provider",
-        ]
+        return models.map {
+            [
+                "id": $0,
+                "object": "model",
+                "owned_by": "claude-compatible-provider",
+            ]
+        }
     }
 
     private func normalizedAvailableModels(_ availableModels: [String], fallbackModel: String) -> [String] {
-        var normalized = [String]()
-        var seen = Set<String>()
-
-        for model in availableModels {
-            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            normalized.append(trimmed)
-        }
-
-        let trimmedFallback = fallbackModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedFallback.isEmpty, seen.insert(trimmedFallback).inserted {
-            normalized.append(trimmedFallback)
-        }
-
-        return normalized
-    }
-
-    private func isDeepSeekAPIHost(_ baseURL: String) -> Bool {
-        let trimmedBaseURL = baseURL
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmedBaseURL.isEmpty else {
-            return false
-        }
-
-        let rawURL = URL(string: trimmedBaseURL)
-            ?? URL(string: "https://\(trimmedBaseURL)")
-        return rawURL?.host?.lowercased() == "api.deepseek.com"
+        ProviderModelSettings.modelNames(
+            from: availableModels.map { ProviderModelSettings(model: $0) },
+            fallbackModel: fallbackModel
+        )
     }
 
     private func reasonPhrase(for statusCode: Int) -> String {

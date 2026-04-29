@@ -73,7 +73,8 @@ protocol CodexOAuthClaudeBridgeManaging: Sendable {
         accountID: UUID,
         source: OpenAICompatibleClaudeBridgeSource,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedCodexOAuthClaudeBridge
 }
 
@@ -84,6 +85,12 @@ struct PreparedClaudeProviderCodexBridge: Equatable, Sendable {
 }
 
 struct PreparedOpenAICompatibleProviderCodexBridge: Equatable, Sendable {
+    let baseURL: String
+    let apiKeyEnvName: String
+    let apiKey: String
+}
+
+struct PreparedClaudeCompatibleProviderProxy: Equatable, Sendable {
     let baseURL: String
     let apiKeyEnvName: String
     let apiKey: String
@@ -205,7 +212,8 @@ protocol ClaudeProviderCodexBridgeManaging: Sendable {
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedClaudeProviderCodexBridge
 }
 
@@ -216,8 +224,21 @@ protocol OpenAICompatibleProviderCodexBridgeManaging: Sendable {
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedOpenAICompatibleProviderCodexBridge
+}
+
+protocol ClaudeCompatibleProviderProxyManaging: Sendable {
+    func prepareProxy(
+        accountID: UUID,
+        baseURL: String,
+        apiKeyEnvName: String,
+        apiKey: String,
+        model: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) async throws -> PreparedClaudeCompatibleProviderProxy
 }
 
 protocol QuotaMonitoring: AnyObject {
@@ -287,7 +308,8 @@ protocol CLIEnvironmentResolving: Sendable {
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
         copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
-        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
+        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging,
+        claudeCompatibleProviderProxyManager: any ClaudeCompatibleProviderProxyManaging
     ) async throws -> ResolvedClaudeCLILaunchContext
 }
 

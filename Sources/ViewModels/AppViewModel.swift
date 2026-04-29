@@ -133,6 +133,7 @@ final class AppViewModel: ObservableObject {
     @Published var addAccountProviderBaseURL = "https://api.openai.com/v1"
     @Published var addAccountProviderAPIKeyEnvName = "OPENAI_API_KEY"
     @Published var addAccountDefaultModel = "gpt-5.4"
+    @Published var addAccountProviderModelSettings = [ProviderModelSettings(model: "gpt-5.4")]
     @Published var desktopLaunchPresetID = "deepseek"
     @Published var desktopLaunchDisplayName = ""
     @Published var desktopLaunchDefaultModel = "deepseek-chat"
@@ -195,6 +196,7 @@ final class AppViewModel: ObservableObject {
     private let copilotSessionImporter: any CopilotSessionQueueImporting
     private let openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging
     private let claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging
+    private let claudeCompatibleProviderProxyManager: any ClaudeCompatibleProviderProxyManaging
     private let runtimes: [PlatformKind: any PlatformRuntime]
     private let bannerAutoDismissDuration: Duration
     private let codexSubscriptionQuotaAutoRefreshInterval: Duration?
@@ -243,6 +245,7 @@ final class AppViewModel: ObservableObject {
         copilotACPDebugStore: CopilotACPDebugStore = CopilotACPDebugStore(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = OpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = ClaudeProviderCodexBridgeManager(),
+        claudeCompatibleProviderProxyManager: any ClaudeCompatibleProviderProxyManaging = ClaudeCompatibleProviderProxyManager(),
         platformRuntimes: [any PlatformRuntime] = [CodexPlatformRuntime(), ClaudePlatformRuntime()],
         bannerAutoDismissDuration: Duration = .seconds(10),
         codexSubscriptionQuotaAutoRefreshInterval: Duration? = .seconds(300)
@@ -283,6 +286,7 @@ final class AppViewModel: ObservableObject {
             ?? CopilotSessionQueueImporter(appSupportDirectoryURL: paths.appSupportDirectoryURL)
         self.openAICompatibleProviderCodexBridgeManager = openAICompatibleProviderCodexBridgeManager
         self.claudeProviderCodexBridgeManager = claudeProviderCodexBridgeManager
+        self.claudeCompatibleProviderProxyManager = claudeCompatibleProviderProxyManager
         self.runtimes = Dictionary(uniqueKeysWithValues: platformRuntimes.map { ($0.platform, $0) })
         self.bannerAutoDismissDuration = bannerAutoDismissDuration
         self.codexSubscriptionQuotaAutoRefreshInterval = codexSubscriptionQuotaAutoRefreshInterval
@@ -366,6 +370,7 @@ final class AppViewModel: ObservableObject {
                 copilotACPDebugStore: copilotACPDebugStore,
                 openAICompatibleProviderCodexBridgeManager: OpenAICompatibleProviderCodexBridgeManager(),
                 claudeProviderCodexBridgeManager: ClaudeProviderCodexBridgeManager(),
+                claudeCompatibleProviderProxyManager: ClaudeCompatibleProviderProxyManager(),
                 platformRuntimes: [CodexPlatformRuntime(), ClaudePlatformRuntime()]
             )
         } catch {
@@ -550,11 +555,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var availableProviderPresets: [ProviderPreset] {
-        let presets = ProviderCatalog.presets(for: addAccountProviderRule)
-        if addAccountProviderPresetID == ProviderCatalog.customPresetID {
-            return presets
-        }
-        return presets.filter { $0.id != ProviderCatalog.customPresetID }
+        ProviderCatalog.presets(for: addAccountProviderRule)
     }
 
     var selectedProviderPreset: ProviderPreset? {
@@ -756,6 +757,7 @@ final class AppViewModel: ObservableObject {
         addAccountProviderBaseURL = account.resolvedProviderBaseURL
         addAccountProviderAPIKeyEnvName = account.resolvedProviderAPIKeyEnvName
         addAccountDefaultModel = account.resolvedDefaultModel
+        addAccountProviderModelSettings = account.resolvedProviderModelSettings
         addAccountStatus = selectedAddAccountMessage
     }
 
@@ -1747,7 +1749,8 @@ final class AppViewModel: ObservableObject {
                 providerDisplayName: preset.displayName,
                 providerBaseURL: preset.baseURL,
                 providerAPIKeyEnvName: preset.apiKeyEnvName,
-                defaultModel: trimmedModel
+                defaultModel: trimmedModel,
+                providerModelSettings: [ProviderModelSettings(model: trimmedModel)]
             )
             launchedAccountID = account.id
             if !trimmedDisplayName.isEmpty {
@@ -1974,15 +1977,17 @@ final class AppViewModel: ObservableObject {
         addAccountError = nil
         let apiKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let preferredDisplayName = apiKeyDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedModel = addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !apiKey.isEmpty else {
             addAccountError = L10n.tr("请输入 API Key。")
             return
         }
 
-        guard !trimmedModel.isEmpty else {
-            addAccountError = L10n.tr("请输入默认模型。")
+        let providerModelSettings: [ProviderModelSettings]
+        do {
+            providerModelSettings = try validatedProviderModelSettings()
+        } catch {
+            addAccountError = error.localizedDescription
             return
         }
 
@@ -1998,7 +2003,11 @@ final class AppViewModel: ObservableObject {
                 providerName: addAccountProviderDisplayName.trimmingCharacters(in: .whitespacesAndNewlines),
                 preferredDisplayName: preferredDisplayName.isEmpty ? nil : preferredDisplayName
             )
-            try await finalizeProviderLogin(identity: identity, credential: credential)
+            try await finalizeProviderLogin(
+                identity: identity,
+                credential: credential,
+                providerModelSettings: providerModelSettings
+            )
         } catch {
             addAccountError = error.localizedDescription
             addAccountStatus = L10n.tr("API Key 接入失败。")
@@ -2371,7 +2380,8 @@ final class AppViewModel: ObservableObject {
 
     private func finalizeProviderLogin(
         identity: AuthIdentity,
-        credential: ProviderAPIKeyCredential
+        credential: ProviderAPIKeyCredential,
+        providerModelSettings: [ProviderModelSettings]
     ) async throws {
         let account = upsertProviderAccount(
             identity: identity,
@@ -2381,7 +2391,8 @@ final class AppViewModel: ObservableObject {
             providerDisplayName: addAccountProviderDisplayName.trimmingCharacters(in: .whitespacesAndNewlines),
             providerBaseURL: addAccountProviderBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             providerAPIKeyEnvName: addAccountProviderAPIKeyEnvName.trimmingCharacters(in: .whitespacesAndNewlines),
-            defaultModel: addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            defaultModel: addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            providerModelSettings: providerModelSettings
         )
         try credentialStore.save(.providerAPIKey(credential), for: account.id)
         setActiveAccount(account.id)
@@ -2475,11 +2486,13 @@ final class AppViewModel: ObservableObject {
         let trimmedProviderName = addAccountProviderDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBaseURL = addAccountProviderBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedEnvName = addAccountProviderAPIKeyEnvName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedModel = addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAPIKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard !trimmedModel.isEmpty else {
-            addAccountError = L10n.tr("请输入默认模型。")
+        let providerModelSettings: [ProviderModelSettings]
+        do {
+            providerModelSettings = try validatedProviderModelSettings()
+        } catch {
+            addAccountError = error.localizedDescription
             return
         }
 
@@ -2528,7 +2541,8 @@ final class AppViewModel: ObservableObject {
             updatedAccount.providerDisplayName = trimmedProviderName.isEmpty ? selectedProviderPreset?.displayName : trimmedProviderName
             updatedAccount.providerBaseURL = trimmedBaseURL
             updatedAccount.providerAPIKeyEnvName = trimmedEnvName
-            updatedAccount.defaultModel = trimmedModel
+            updatedAccount.defaultModel = addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            updatedAccount.providerModelSettings = providerModelSettings
 
             database.upsert(account: updatedAccount)
 
@@ -2720,7 +2734,8 @@ final class AppViewModel: ObservableObject {
         providerDisplayName: String,
         providerBaseURL: String,
         providerAPIKeyEnvName: String,
-        defaultModel: String
+        defaultModel: String,
+        providerModelSettings: [ProviderModelSettings]
     ) -> ManagedAccount {
         let existing = database.accounts.first(where: { $0.accountIdentifier == identity.accountID })
         let trimmedProviderDisplayName = providerDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2742,6 +2757,10 @@ final class AppViewModel: ObservableObject {
             providerAPIKeyEnvName: providerAPIKeyEnvName.trimmingCharacters(in: .whitespacesAndNewlines),
             defaultModel: defaultModel.trimmingCharacters(in: .whitespacesAndNewlines),
             defaultModelReasoningEffort: existing?.defaultModelReasoningEffort,
+            providerModelSettings: ProviderModelSettings.normalized(
+                providerModelSettings,
+                fallbackModel: defaultModel
+            ),
             defaultCLITarget: existing?.defaultCLITarget ?? providerRule.defaultTarget,
             createdAt: existing?.createdAt ?? Date(),
             lastUsedAt: existing?.lastUsedAt,
@@ -3426,7 +3445,8 @@ final class AppViewModel: ObservableObject {
             claudePatchedRuntimeManager: claudePatchedRuntimeManager,
             copilotStatus: copilotStatus,
             copilotResponsesBridgeManager: copilotResponsesBridgeManager,
-            codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager
+            codexOAuthClaudeBridgeManager: codexOAuthClaudeBridgeManager,
+            claudeCompatibleProviderProxyManager: claudeCompatibleProviderProxyManager
         )
     }
 
@@ -3850,6 +3870,7 @@ final class AppViewModel: ObservableObject {
         apiKeyDisplayName = ""
         copilotHostInput = "https://github.com"
         addAccountProviderDisplayName = ""
+        addAccountProviderModelSettings = [ProviderModelSettings(model: addAccountDefaultModel)]
         addAccountError = nil
         isAuthenticating = false
         isBrowserAuthorizationPending = false
@@ -3871,6 +3892,7 @@ final class AppViewModel: ObservableObject {
             addAccountProviderBaseURL = preset.baseURL
             addAccountProviderAPIKeyEnvName = preset.apiKeyEnvName
             addAccountDefaultModel = preset.defaultModel
+            addAccountProviderModelSettings = [ProviderModelSettings(model: preset.defaultModel)]
         } else {
             if addAccountProviderDisplayName.isEmpty {
                 addAccountProviderDisplayName = ""
@@ -3881,8 +3903,105 @@ final class AppViewModel: ObservableObject {
             if addAccountProviderAPIKeyEnvName.isEmpty {
                 addAccountProviderAPIKeyEnvName = addAccountProviderRule == .claudeCompatible ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
             }
+            if addAccountProviderModelSettings.isEmpty {
+                addAccountProviderModelSettings = addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? [ProviderModelSettings(model: "")]
+                    : [ProviderModelSettings(model: addAccountDefaultModel)]
+            }
         }
         addAccountStatus = selectedAddAccountMessage
+    }
+
+    func addProviderModelSettingRow() {
+        addAccountProviderModelSettings.append(ProviderModelSettings(model: ""))
+    }
+
+    func removeProviderModelSetting(at index: Int) {
+        guard addAccountProviderModelSettings.indices.contains(index) else { return }
+        let removedModel = addAccountProviderModelSettings[index].model
+        addAccountProviderModelSettings.remove(at: index)
+        if addAccountProviderModelSettings.isEmpty {
+            addAccountProviderModelSettings.append(ProviderModelSettings(model: ""))
+        }
+        if addAccountDefaultModel == removedModel {
+            addAccountDefaultModel = addAccountProviderModelSettings.first?.model ?? ""
+        }
+    }
+
+    func updateProviderModelName(at index: Int, model: String) {
+        guard addAccountProviderModelSettings.indices.contains(index) else { return }
+        let previousModel = addAccountProviderModelSettings[index].model
+        addAccountProviderModelSettings[index].model = model
+        if addAccountDefaultModel == previousModel || addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            addAccountDefaultModel = model
+        }
+    }
+
+    func updateProviderModelTemperature(at index: Int, temperature: Double) {
+        guard addAccountProviderModelSettings.indices.contains(index) else { return }
+        addAccountProviderModelSettings[index].temperature = temperature
+    }
+
+    func updateProviderModelTopP(at index: Int, topP: Double) {
+        guard addAccountProviderModelSettings.indices.contains(index) else { return }
+        addAccountProviderModelSettings[index].topP = topP
+    }
+
+    func selectDefaultProviderModel(_ model: String) {
+        addAccountDefaultModel = model
+    }
+
+    private func validatedProviderModelSettings() throws -> [ProviderModelSettings] {
+        let trimmedDefaultModel = addAccountDefaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDefaultModel.isEmpty,
+           addAccountProviderModelSettings.count == 1,
+           addAccountProviderModelSettings[0].model.trimmingCharacters(in: .whitespacesAndNewlines) != trimmedDefaultModel
+        {
+            addAccountProviderModelSettings[0].model = trimmedDefaultModel
+        }
+
+        var normalized = [ProviderModelSettings]()
+        var seen = Set<String>()
+
+        for setting in addAccountProviderModelSettings {
+            let model = setting.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !model.isEmpty else {
+                throw providerValidationError(L10n.tr("请输入模型名称。"))
+            }
+            guard seen.insert(model).inserted else {
+                throw providerValidationError(L10n.tr("模型 %@ 重复。", model))
+            }
+            guard (0...2).contains(setting.temperature) else {
+                throw providerValidationError(L10n.tr("模型 %@ 的 temperature 必须在 0 到 2 之间。", model))
+            }
+            guard setting.topP > 0, setting.topP <= 1 else {
+                throw providerValidationError(L10n.tr("模型 %@ 的 top_p 必须大于 0 且不超过 1。", model))
+            }
+            normalized.append(
+                ProviderModelSettings(
+                    model: model,
+                    temperature: setting.temperature,
+                    topP: setting.topP
+                )
+            )
+        }
+
+        guard !trimmedDefaultModel.isEmpty else {
+            throw providerValidationError(L10n.tr("请选择默认模型。"))
+        }
+        guard normalized.contains(where: { $0.model == trimmedDefaultModel }) else {
+            throw providerValidationError(L10n.tr("默认模型必须来自模型列表。"))
+        }
+
+        return normalized
+    }
+
+    private func providerValidationError(_ message: String) -> NSError {
+        NSError(
+            domain: "AppViewModel.ProviderModelSettings",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     private func syncSelectedAccount(preferredAccountID: UUID? = nil) {

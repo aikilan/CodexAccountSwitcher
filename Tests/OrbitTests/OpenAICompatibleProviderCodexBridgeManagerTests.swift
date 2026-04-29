@@ -60,7 +60,8 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
             apiKeyEnvName: "DEEPSEEK_API_KEY",
             apiKey: "sk-deepseek-test",
             model: "deepseek-chat",
-            availableModels: ["deepseek-chat"]
+            availableModels: ["deepseek-chat"],
+            modelSettings: [ProviderModelSettings(model: "deepseek-chat", temperature: 0.7, topP: 0.8)]
         )
 
         var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
@@ -111,6 +112,8 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
 
         XCTAssertEqual(httpResponse.statusCode, 200)
         XCTAssertEqual(upstreamRequestObject["model"] as? String, "deepseek-chat")
+        XCTAssertEqual(upstreamRequestObject["temperature"] as? Double, 0.7)
+        XCTAssertEqual(upstreamRequestObject["top_p"] as? Double, 0.8)
         XCTAssertEqual(upstreamMessages.first?["role"] as? String, "system")
         XCTAssertEqual(upstreamMessages.dropFirst().first?["content"] as? String, "列出当前目录")
         XCTAssertEqual(output.first?["type"] as? String, "message")

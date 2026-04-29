@@ -81,6 +81,21 @@ struct ClaudeCLILauncher {
         } else {
             settingsObject.removeValue(forKey: "availableModels")
         }
+        let modelSettings = ProviderModelSettings.normalized(
+            providerSnapshot.modelSettings,
+            fallbackModel: providerSnapshot.model
+        )
+        if modelSettings.isEmpty {
+            settingsObject.removeValue(forKey: "modelSettings")
+        } else {
+            settingsObject["modelSettings"] = modelSettings.map { setting in
+                [
+                    "model": setting.model,
+                    "temperature": setting.temperature,
+                    "top_p": setting.topP,
+                ] as [String: Any]
+            }
+        }
 
         let data = try JSONSerialization.data(withJSONObject: settingsObject, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: settingsURL, options: .atomic)

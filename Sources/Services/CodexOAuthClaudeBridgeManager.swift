@@ -198,7 +198,8 @@ actor CodexOAuthClaudeBridgeManager {
         accountID: UUID,
         source: OpenAICompatibleClaudeBridgeSource,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings] = []
     ) async throws -> PreparedCodexOAuthClaudeBridge {
         if case let .codexAuthPayload(payload) = source,
            payload.authMode != .chatgpt && payload.authMode != .openAIAPIKey
@@ -208,7 +209,12 @@ actor CodexOAuthClaudeBridgeManager {
 
         let key = accountID.uuidString
         let server = servers[key] ?? CodexOAuthClaudeBridgeServer(sendUpstreamRequest: sendUpstreamRequest)
-        server.update(source: source, defaultModel: model, availableModels: availableModels)
+        server.update(
+            source: source,
+            defaultModel: model,
+            availableModels: availableModels,
+            modelSettings: modelSettings
+        )
         let baseURL = try await server.startIfNeeded()
         servers[key] = server
 
@@ -266,6 +272,7 @@ fileprivate final class CodexOAuthClaudeBridgeServer: @unchecked Sendable {
     private var source: OpenAICompatibleClaudeBridgeSource?
     private var defaultModel = "gpt-5.4"
     private var availableModels = ["gpt-5.4"]
+    private var modelSettings = [ProviderModelSettings]()
 
     init(
         sendUpstreamRequest: @escaping @Sendable (OpenAICompatibleClaudeBridgeSource, Data) async throws -> CodexOAuthClaudeBridgeUpstreamResponse
@@ -273,13 +280,19 @@ fileprivate final class CodexOAuthClaudeBridgeServer: @unchecked Sendable {
         self.sendUpstreamRequest = sendUpstreamRequest
     }
 
-    func update(source: OpenAICompatibleClaudeBridgeSource, defaultModel: String, availableModels: [String]) {
+    func update(
+        source: OpenAICompatibleClaudeBridgeSource,
+        defaultModel: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) {
         stateQueue.sync {
             self.source = source
             if !defaultModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 self.defaultModel = defaultModel
             }
             self.availableModels = normalizedAvailableModels(availableModels, fallbackModel: defaultModel)
+            self.modelSettings = ProviderModelSettings.normalized(modelSettings, fallbackModel: defaultModel)
         }
     }
 
@@ -452,7 +465,11 @@ fileprivate final class CodexOAuthClaudeBridgeServer: @unchecked Sendable {
                     body: errorPayload(type: "api_error", message: L10n.tr("本地 Codex 凭据桥接启动失败。"))
                 )
             }
-            let upstreamBody = try Self.makeResponsesRequestData(from: request.body, fallbackModel: defaultModel)
+            let upstreamBody = try Self.makeResponsesRequestData(
+                from: request.body,
+                fallbackModel: defaultModel,
+                modelSettings: state.modelSettings
+            )
             let upstreamResponse = try await sendUpstreamRequest(source, upstreamBody)
 
             if (200..<300).contains(upstreamResponse.statusCode) {
@@ -533,9 +550,14 @@ fileprivate final class CodexOAuthClaudeBridgeServer: @unchecked Sendable {
         ]
     }
 
-    private func currentState() -> (source: OpenAICompatibleClaudeBridgeSource?, defaultModel: String, availableModels: [String]) {
+    private func currentState() -> (
+        source: OpenAICompatibleClaudeBridgeSource?,
+        defaultModel: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) {
         stateQueue.sync {
-            (source, defaultModel, availableModels)
+            (source, defaultModel, availableModels, modelSettings)
         }
     }
 
@@ -646,8 +668,23 @@ fileprivate final class CodexOAuthClaudeBridgeServer: @unchecked Sendable {
             ?? L10n.tr("上游模型返回了未知错误。")
     }
 
-    private static func makeResponsesRequestData(from data: Data, fallbackModel: String) throws -> Data {
-        try makeCodexResponsesBridgeRequestData(from: data, fallbackModel: fallbackModel)
+    private static func makeResponsesRequestData(
+        from data: Data,
+        fallbackModel: String,
+        modelSettings: [ProviderModelSettings]
+    ) throws -> Data {
+        let responseData = try makeCodexResponsesBridgeRequestData(from: data, fallbackModel: fallbackModel)
+        guard
+            let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any]
+        else {
+            return responseData
+        }
+        return try ProviderModelSettings.applyParameters(
+            toJSONData: responseData,
+            requestedModel: object["model"] as? String,
+            settings: modelSettings,
+            fallbackModel: fallbackModel
+        )
     }
 
     private static func extractCompletedResponsesData(from data: Data) throws -> Data {

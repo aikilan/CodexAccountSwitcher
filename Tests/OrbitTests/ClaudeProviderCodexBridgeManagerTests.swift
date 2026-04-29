@@ -41,6 +41,72 @@ final class ClaudeProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "x-api-key"))
     }
 
+    func testBridgeInjectsConfiguredModelParametersIntoClaudeRequest() async throws {
+        actor Recorder {
+            var lastRequestBody: Data?
+
+            func store(_ data: Data) {
+                lastRequestBody = data
+            }
+
+            func body() -> Data? {
+                lastRequestBody
+            }
+        }
+
+        let recorder = Recorder()
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4.5",
+            "content": [
+                ["type": "text", "text": "ok"],
+            ],
+            "stop_reason": "end_turn",
+            "usage": [
+                "input_tokens": 1,
+                "output_tokens": 1,
+            ],
+        ])
+        let manager = ClaudeProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, body in
+                await recorder.store(body)
+                return (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.anthropic.com/v1",
+            apiKeyEnvName: "ANTHROPIC_API_KEY",
+            apiKey: "sk-ant-test",
+            model: "claude-sonnet-4.5",
+            availableModels: ["claude-sonnet-4.5"],
+            modelSettings: [ProviderModelSettings(model: "claude-sonnet-4.5", temperature: 0.45, topP: 0.88)]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-sonnet-4.5",
+            "stream": false,
+            "input": "说一句话",
+        ])
+
+        let session = URLSession(configuration: .ephemeral)
+        let (_, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let recordedBody = await recorder.body()
+        let upstreamBody = try XCTUnwrap(recordedBody)
+        let upstreamObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamBody) as? [String: Any])
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(upstreamObject["temperature"] as? Double, 0.45)
+        XCTAssertEqual(upstreamObject["top_p"] as? Double, 0.88)
+    }
+
     func testBridgeNormalizesPersistent529To429AfterRetrying() async throws {
         actor AttemptCounter {
             private var count = 0

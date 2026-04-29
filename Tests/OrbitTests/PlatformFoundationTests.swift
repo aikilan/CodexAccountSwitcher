@@ -376,12 +376,14 @@ final class PlatformFoundationTests: XCTestCase {
         XCTAssertEqual(openAIAccount.providerRule, .openAICompatible)
         XCTAssertEqual(openAIAccount.providerPresetID, "openai")
         XCTAssertEqual(openAIAccount.defaultModel, "gpt-5.4")
+        XCTAssertEqual(openAIAccount.resolvedProviderModelSettings, [ProviderModelSettings(model: "gpt-5.4")])
         XCTAssertEqual(openAIAccount.defaultCLITarget, .codex)
 
         XCTAssertEqual(anthropicAccount.authKind, .providerAPIKey)
         XCTAssertEqual(anthropicAccount.providerRule, .claudeCompatible)
         XCTAssertEqual(anthropicAccount.providerPresetID, "anthropic")
         XCTAssertEqual(anthropicAccount.defaultModel, "claude-sonnet-4.5")
+        XCTAssertEqual(anthropicAccount.resolvedProviderModelSettings, [ProviderModelSettings(model: "claude-sonnet-4.5")])
         XCTAssertEqual(anthropicAccount.defaultCLITarget, .claude)
     }
 

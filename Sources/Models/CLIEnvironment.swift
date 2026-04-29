@@ -451,6 +451,25 @@ struct ResolvedClaudeProviderSnapshot: Equatable, Sendable {
     let baseURL: String
     let apiKeyEnvName: String
     let availableModels: [String]?
+    let modelSettings: [ProviderModelSettings]
+
+    init(
+        source: ClaudeProviderSource,
+        model: String,
+        modelProvider: String?,
+        baseURL: String,
+        apiKeyEnvName: String,
+        availableModels: [String]?,
+        modelSettings: [ProviderModelSettings] = []
+    ) {
+        self.source = source
+        self.model = model
+        self.modelProvider = modelProvider
+        self.baseURL = baseURL
+        self.apiKeyEnvName = apiKeyEnvName
+        self.availableModels = availableModels
+        self.modelSettings = modelSettings
+    }
 }
 
 struct ResolvedClaudeCLILaunchContext: Equatable, Sendable {

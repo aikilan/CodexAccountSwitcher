@@ -1389,6 +1389,77 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(try harness.credentialStore.load(for: try XCTUnwrap(harness.model.activeAccount?.id)).providerAPIKeyCredential?.apiKey, "sk-test-api-key")
     }
 
+    func testStartAPIKeyLoginSavesProviderModelSettings() async throws {
+        let accountID = UUID()
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        )
+
+        await harness.model.prepare()
+        harness.model.addAccountMode = .providerAPIKey
+        harness.model.addAccountProviderRule = .openAICompatible
+        harness.model.applyProviderPreset(ProviderCatalog.preset(id: ProviderCatalog.customPresetID))
+        harness.model.addAccountProviderDisplayName = "Custom OpenAI"
+        harness.model.addAccountProviderBaseURL = "https://openai-compatible.example.com/v1"
+        harness.model.addAccountProviderAPIKeyEnvName = "CUSTOM_OPENAI_API_KEY"
+        harness.model.addAccountDefaultModel = "model-b"
+        harness.model.addAccountProviderModelSettings = [
+            ProviderModelSettings(model: "model-a", temperature: 0.2, topP: 0.9),
+            ProviderModelSettings(model: "model-b", temperature: 0.7, topP: 0.8),
+        ]
+        harness.model.apiKeyInput = "sk-custom-openai"
+
+        await harness.model.startAPIKeyLogin()
+
+        let account = try XCTUnwrap(harness.model.activeAccount)
+        XCTAssertNil(harness.model.addAccountError)
+        XCTAssertEqual(account.defaultModel, "model-b")
+        XCTAssertEqual(
+            account.providerModelSettings,
+            [
+                ProviderModelSettings(model: "model-a", temperature: 0.2, topP: 0.9),
+                ProviderModelSettings(model: "model-b", temperature: 0.7, topP: 0.8),
+            ]
+        )
+    }
+
+    func testStartAPIKeyLoginRejectsInvalidProviderModelSettings() async throws {
+        let accountID = UUID()
+        let harness = try await makeHarness(
+            accountID: accountID,
+            cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
+            authFileManager: RecordingAuthFileManager(),
+            oauthClient: MockOAuthClient(refreshResult: .failure(MockError.refreshFailed)),
+            runtimeInspector: MockRuntimeInspector(result: .noRunningClient, isRunning: false)
+        )
+
+        await harness.model.prepare()
+        harness.model.addAccountMode = .providerAPIKey
+        harness.model.addAccountProviderRule = .openAICompatible
+        harness.model.applyProviderPreset(ProviderCatalog.preset(id: ProviderCatalog.customPresetID))
+        harness.model.addAccountProviderDisplayName = "Custom OpenAI"
+        harness.model.addAccountProviderBaseURL = "https://openai-compatible.example.com/v1"
+        harness.model.addAccountProviderAPIKeyEnvName = "CUSTOM_OPENAI_API_KEY"
+        harness.model.addAccountDefaultModel = "model-a"
+        harness.model.addAccountProviderModelSettings = [
+            ProviderModelSettings(model: "model-a", temperature: 0.3, topP: 1.2),
+        ]
+        harness.model.apiKeyInput = "sk-custom-openai"
+
+        await harness.model.startAPIKeyLogin()
+
+        XCTAssertEqual(
+            harness.model.addAccountError,
+            L10n.tr("模型 %@ 的 top_p 必须大于 0 且不超过 1。", "model-a")
+        )
+        XCTAssertEqual(harness.model.accounts.count, 1)
+    }
+
+
     func testStartAPIKeyLoginKeepsExistingAccountsWhenAddingDifferentKey() async throws {
         let accountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
@@ -2075,7 +2146,11 @@ final class AppViewModelTests: XCTestCase {
                         providerDisplayName: "DeepSeek",
                         baseURL: "https://api.deepseek.com/v1",
                         envName: "DEEPSEEK_API_KEY",
-                        model: "deepseek-chat"
+                        model: "deepseek-chat",
+                        providerModelSettings: [
+                            ProviderModelSettings(model: "deepseek-chat", temperature: 0.2, topP: 0.9),
+                            ProviderModelSettings(model: "deepseek-reasoner", temperature: 0.1, topP: 0.85),
+                        ]
                     ),
                     payload: .providerAPIKey(customCredential),
                     snapshot: nil
@@ -2116,7 +2191,11 @@ final class AppViewModelTests: XCTestCase {
                         providerDisplayName: "DeepSeek",
                         baseURL: "https://api.deepseek.com/v1",
                         envName: "DEEPSEEK_API_KEY",
-                        model: "deepseek-chat"
+                        model: "deepseek-chat",
+                        providerModelSettings: [
+                            ProviderModelSettings(model: "deepseek-chat", temperature: 0.2, topP: 0.9),
+                            ProviderModelSettings(model: "deepseek-reasoner", temperature: 0.1, topP: 0.85),
+                        ]
                     ),
                     payload: .providerAPIKey(customCredential),
                     snapshot: nil
@@ -2140,12 +2219,19 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(harness.model.addAccountProviderAPIKeyEnvName, "DEEPSEEK_API_KEY")
         XCTAssertEqual(harness.model.addAccountDefaultModel, "deepseek-chat")
         XCTAssertEqual(
+            harness.model.addAccountProviderModelSettings,
+            [
+                ProviderModelSettings(model: "deepseek-chat", temperature: 0.2, topP: 0.9),
+                ProviderModelSettings(model: "deepseek-reasoner", temperature: 0.1, topP: 0.85),
+            ]
+        )
+        XCTAssertEqual(
             harness.model.addAccountStatus,
             L10n.tr("修改当前供应商配置；API Key 留空表示继续使用当前凭据。")
         )
     }
 
-    func testAvailableProviderPresetsHideCustomDuringCreateFlow() async throws {
+    func testAvailableProviderPresetsShowCustomDuringCreateFlow() async throws {
         let harness = try await makeHarness(
             accountID: UUID(),
             cachedPayload: makePayload(accountID: "acct_cached", refreshToken: "refresh_old"),
@@ -2156,12 +2242,12 @@ final class AppViewModelTests: XCTestCase {
 
         await harness.model.prepare()
 
-        XCTAssertFalse(harness.model.availableProviderPresets.contains(where: { $0.id == ProviderCatalog.customPresetID }))
+        XCTAssertTrue(harness.model.availableProviderPresets.contains(where: { $0.id == ProviderCatalog.customPresetID }))
 
         harness.model.addAccountProviderRule = .claudeCompatible
         harness.model.applyProviderPreset(ProviderCatalog.preset(id: "anthropic"))
 
-        XCTAssertFalse(harness.model.availableProviderPresets.contains(where: { $0.id == ProviderCatalog.customPresetID }))
+        XCTAssertTrue(harness.model.availableProviderPresets.contains(where: { $0.id == ProviderCatalog.customPresetID }))
     }
 
     func testAvailableProviderPresetsKeepCustomForEditingExistingCustomAccount() async throws {
@@ -2243,6 +2329,10 @@ final class AppViewModelTests: XCTestCase {
         harness.model.addAccountProviderBaseURL = "https://new.example.com/v1"
         harness.model.addAccountProviderAPIKeyEnvName = "UPDATED_API_KEY"
         harness.model.addAccountDefaultModel = "new-model"
+        harness.model.addAccountProviderModelSettings = [
+            ProviderModelSettings(model: "new-model", temperature: 0.6, topP: 0.7),
+            ProviderModelSettings(model: "new-model-large", temperature: 0.4, topP: 0.95),
+        ]
         harness.model.apiKeyInput = ""
 
         await harness.model.startAPIKeyLogin()
@@ -2255,6 +2345,13 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(updatedAccount.providerBaseURL, "https://new.example.com/v1")
         XCTAssertEqual(updatedAccount.providerAPIKeyEnvName, "UPDATED_API_KEY")
         XCTAssertEqual(updatedAccount.defaultModel, "new-model")
+        XCTAssertEqual(
+            updatedAccount.providerModelSettings,
+            [
+                ProviderModelSettings(model: "new-model", temperature: 0.6, topP: 0.7),
+                ProviderModelSettings(model: "new-model-large", temperature: 0.4, topP: 0.95),
+            ]
+        )
         XCTAssertEqual(try harness.credentialStore.load(for: customAccountID).providerAPIKeyCredential?.apiKey, "sk-custom-keep-old")
         XCTAssertFalse(harness.model.isEditingProviderAccount)
     }
@@ -2503,7 +2600,8 @@ final class AppViewModelTests: XCTestCase {
                 modelProvider: "openai",
                 baseURL: "http://127.0.0.1:18080",
                 apiKeyEnvName: "ANTHROPIC_API_KEY",
-                availableModels: ["gpt-5.4"]
+                availableModels: ["gpt-5.4"],
+                modelSettings: [ProviderModelSettings(model: "gpt-5.4")]
             )
         )
         XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18080")
@@ -2765,12 +2863,13 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(claudeCLILauncher.lastContext?.providerSnapshot?.availableModels, ["glm-5"])
     }
 
-    func testMiniMaxClaudeCompatibleProviderAccountOpensClaudeCodeWithAnthropicAuthToken() async throws {
+    func testMiniMaxClaudeCompatibleProviderAccountOpensClaudeCodeThroughProxy() async throws {
         let accountID = UUID()
         let providerAccountID = UUID()
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
         let claudeCLILauncher = RecordingClaudeCLILauncher()
         let patchedRuntimeManager = RecordingClaudePatchedRuntimeManager()
+        let proxyManager = RecordingClaudeCompatibleProviderProxyManager()
 
         let harness = try await makeHarness(
             accountID: accountID,
@@ -2798,7 +2897,8 @@ final class AppViewModelTests: XCTestCase {
                 )
             ],
             claudeCLILauncher: claudeCLILauncher,
-            claudePatchedRuntimeManager: patchedRuntimeManager
+            claudePatchedRuntimeManager: patchedRuntimeManager,
+            claudeCompatibleProviderProxyManager: proxyManager
         )
 
         await harness.model.prepare()
@@ -2812,21 +2912,31 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(claudeCLILauncher.launchCallCount, 1)
         XCTAssertNil(claudeCLILauncher.lastContext?.executableOverrideURL)
+        let proxySnapshot = await proxyManager.snapshot()
+        XCTAssertEqual(proxySnapshot.prepareCallCount, 1)
+        XCTAssertEqual(proxySnapshot.lastAccountID, providerAccountID)
+        XCTAssertEqual(proxySnapshot.lastBaseURL, "https://api.minimax.io/anthropic/v1")
+        XCTAssertEqual(proxySnapshot.lastAPIKeyEnvName, "MINIMAX_API_KEY")
+        XCTAssertEqual(proxySnapshot.lastAPIKey, "sk-minimax-claude")
+        XCTAssertEqual(proxySnapshot.lastModel, "MiniMax-M2.7")
+        XCTAssertEqual(proxySnapshot.lastAvailableModels, ["MiniMax-M2.7"])
+        XCTAssertEqual(proxySnapshot.lastModelSettings, [ProviderModelSettings(model: "MiniMax-M2.7")])
         XCTAssertEqual(
             claudeCLILauncher.lastContext?.providerSnapshot,
             ResolvedClaudeProviderSnapshot(
                 source: .explicitProvider,
                 model: "MiniMax-M2.7",
                 modelProvider: nil,
-                baseURL: "https://api.minimax.io/anthropic",
-                apiKeyEnvName: "MINIMAX_API_KEY",
-                availableModels: ["MiniMax-M2.7"]
+                baseURL: "http://127.0.0.1:18084",
+                apiKeyEnvName: "ANTHROPIC_API_KEY",
+                availableModels: ["MiniMax-M2.7"],
+                modelSettings: [ProviderModelSettings(model: "MiniMax-M2.7")]
             )
         )
-        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "https://api.minimax.io/anthropic")
-        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_AUTH_TOKEN"], "sk-minimax-claude")
-        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["MINIMAX_API_KEY"], "sk-minimax-claude")
-        XCTAssertNil(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_API_KEY"])
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18084")
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_API_KEY"], "claude-compatible-provider-proxy")
+        XCTAssertNil(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_AUTH_TOKEN"])
+        XCTAssertNil(claudeCLILauncher.lastContext?.environmentVariables["MINIMAX_API_KEY"])
         XCTAssertEqual(harness.model.defaultCLITarget(for: account), .claude)
     }
 
@@ -2836,6 +2946,7 @@ final class AppViewModelTests: XCTestCase {
         let cachedPayload = makePayload(accountID: "acct_cached", refreshToken: "refresh_old")
         let claudeCLILauncher = RecordingClaudeCLILauncher()
         let patchedRuntimeManager = RecordingClaudePatchedRuntimeManager()
+        let proxyManager = RecordingClaudeCompatibleProviderProxyManager()
 
         let harness = try await makeHarness(
             accountID: accountID,
@@ -2862,7 +2973,8 @@ final class AppViewModelTests: XCTestCase {
                 )
             ],
             claudeCLILauncher: claudeCLILauncher,
-            claudePatchedRuntimeManager: patchedRuntimeManager
+            claudePatchedRuntimeManager: patchedRuntimeManager,
+            claudeCompatibleProviderProxyManager: proxyManager
         )
 
         await harness.model.prepare()
@@ -2872,19 +2984,29 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(claudeCLILauncher.launchCallCount, 1)
         XCTAssertNil(claudeCLILauncher.lastContext?.executableOverrideURL)
+        let proxySnapshot = await proxyManager.snapshot()
+        XCTAssertEqual(proxySnapshot.prepareCallCount, 1)
+        XCTAssertEqual(proxySnapshot.lastAccountID, providerAccountID)
+        XCTAssertEqual(proxySnapshot.lastBaseURL, "https://api.anthropic.com/v1")
+        XCTAssertEqual(proxySnapshot.lastAPIKeyEnvName, "ANTHROPIC_API_KEY")
+        XCTAssertEqual(proxySnapshot.lastAPIKey, "sk-ant-direct")
+        XCTAssertEqual(proxySnapshot.lastModel, "claude-sonnet-4.5")
+        XCTAssertEqual(proxySnapshot.lastAvailableModels, ["claude-sonnet-4.5"])
+        XCTAssertEqual(proxySnapshot.lastModelSettings, [ProviderModelSettings(model: "claude-sonnet-4.5")])
         XCTAssertEqual(
             claudeCLILauncher.lastContext?.providerSnapshot,
             ResolvedClaudeProviderSnapshot(
                 source: .explicitProvider,
                 model: "claude-sonnet-4.5",
                 modelProvider: nil,
-                baseURL: "https://api.anthropic.com/v1",
+                baseURL: "http://127.0.0.1:18084",
                 apiKeyEnvName: "ANTHROPIC_API_KEY",
-                availableModels: ["claude-sonnet-4.5"]
+                availableModels: ["claude-sonnet-4.5"],
+                modelSettings: [ProviderModelSettings(model: "claude-sonnet-4.5")]
             )
         )
-        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "https://api.anthropic.com/v1")
-        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_API_KEY"], "sk-ant-direct")
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18084")
+        XCTAssertEqual(claudeCLILauncher.lastContext?.environmentVariables["ANTHROPIC_API_KEY"], "claude-compatible-provider-proxy")
         XCTAssertEqual(harness.model.defaultCLITarget(for: account), .claude)
     }
 
@@ -5122,6 +5244,7 @@ final class AppViewModelTests: XCTestCase {
         codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging = RecordingCodexOAuthClaudeBridgeManager(),
         openAICompatibleProviderCodexBridgeManager: any OpenAICompatibleProviderCodexBridgeManaging = RecordingOpenAICompatibleProviderCodexBridgeManager(),
         claudeProviderCodexBridgeManager: any ClaudeProviderCodexBridgeManaging = RecordingClaudeProviderCodexBridgeManager(),
+        claudeCompatibleProviderProxyManager: any ClaudeCompatibleProviderProxyManaging = RecordingClaudeCompatibleProviderProxyManager(),
         copilotSessionImporter: (any CopilotSessionQueueImporting)? = nil,
         bannerAutoDismissDuration: Duration = .seconds(10),
         codexSubscriptionQuotaAutoRefreshInterval: Duration? = nil,
@@ -5236,6 +5359,7 @@ final class AppViewModelTests: XCTestCase {
             copilotSessionImporter: copilotSessionImporter,
             openAICompatibleProviderCodexBridgeManager: openAICompatibleProviderCodexBridgeManager,
             claudeProviderCodexBridgeManager: claudeProviderCodexBridgeManager,
+            claudeCompatibleProviderProxyManager: claudeCompatibleProviderProxyManager,
             bannerAutoDismissDuration: bannerAutoDismissDuration,
             codexSubscriptionQuotaAutoRefreshInterval: codexSubscriptionQuotaAutoRefreshInterval
         )
@@ -5304,6 +5428,7 @@ final class AppViewModelTests: XCTestCase {
         baseURL: String,
         envName: String,
         model: String,
+        providerModelSettings: [ProviderModelSettings]? = nil,
         defaultTarget: CLIEnvironmentTarget? = nil,
         isActive: Bool = false
     ) -> ManagedAccount {
@@ -5320,6 +5445,7 @@ final class AppViewModelTests: XCTestCase {
             providerBaseURL: baseURL,
             providerAPIKeyEnvName: envName,
             defaultModel: model,
+            providerModelSettings: providerModelSettings,
             defaultCLITarget: defaultTarget,
             createdAt: Date(),
             lastUsedAt: nil,
@@ -5905,7 +6031,8 @@ private final class RecordingDesktopCLIEnvironmentResolver: @unchecked Sendable,
         claudePatchedRuntimeManager: any ClaudePatchedRuntimeManaging,
         copilotStatus: CopilotAccountStatus?,
         copilotResponsesBridgeManager: any CopilotResponsesBridgeManaging,
-        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging
+        codexOAuthClaudeBridgeManager: any CodexOAuthClaudeBridgeManaging,
+        claudeCompatibleProviderProxyManager: any ClaudeCompatibleProviderProxyManaging
     ) async throws -> ResolvedClaudeCLILaunchContext {
         throw MockError.unused
     }
@@ -6114,7 +6241,8 @@ private actor RecordingCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBridgeMana
         accountID: UUID,
         source: OpenAICompatibleClaudeBridgeSource,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedCodexOAuthClaudeBridge {
         prepareCallCount += 1
         lastAccountID = accountID
@@ -6164,7 +6292,8 @@ private actor RecordingOpenAICompatibleProviderCodexBridgeManager: OpenAICompati
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedOpenAICompatibleProviderCodexBridge {
         prepareCallCount += 1
         lastAccountID = accountID
@@ -6218,7 +6347,8 @@ private actor RecordingClaudeProviderCodexBridgeManager: ClaudeProviderCodexBrid
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedClaudeProviderCodexBridge {
         prepareCallCount += 1
         lastAccountID = accountID
@@ -6243,6 +6373,65 @@ private actor RecordingClaudeProviderCodexBridgeManager: ClaudeProviderCodexBrid
             lastAPIKey: lastAPIKey,
             lastModel: lastModel,
             lastAvailableModels: lastAvailableModels
+        )
+    }
+}
+
+private actor RecordingClaudeCompatibleProviderProxyManager: ClaudeCompatibleProviderProxyManaging {
+    struct Snapshot: Equatable {
+        let prepareCallCount: Int
+        let lastAccountID: UUID?
+        let lastBaseURL: String?
+        let lastAPIKeyEnvName: String?
+        let lastAPIKey: String?
+        let lastModel: String?
+        let lastAvailableModels: [String]?
+        let lastModelSettings: [ProviderModelSettings]?
+    }
+
+    private var prepareCallCount = 0
+    private var lastAccountID: UUID?
+    private var lastBaseURL: String?
+    private var lastAPIKeyEnvName: String?
+    private var lastAPIKey: String?
+    private var lastModel: String?
+    private var lastAvailableModels: [String]?
+    private var lastModelSettings: [ProviderModelSettings]?
+
+    func prepareProxy(
+        accountID: UUID,
+        baseURL: String,
+        apiKeyEnvName: String,
+        apiKey: String,
+        model: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) async throws -> PreparedClaudeCompatibleProviderProxy {
+        prepareCallCount += 1
+        lastAccountID = accountID
+        lastBaseURL = baseURL
+        lastAPIKeyEnvName = apiKeyEnvName
+        lastAPIKey = apiKey
+        lastModel = model
+        lastAvailableModels = availableModels
+        lastModelSettings = modelSettings
+        return PreparedClaudeCompatibleProviderProxy(
+            baseURL: "http://127.0.0.1:18084",
+            apiKeyEnvName: "ANTHROPIC_API_KEY",
+            apiKey: "claude-compatible-provider-proxy"
+        )
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            prepareCallCount: prepareCallCount,
+            lastAccountID: lastAccountID,
+            lastBaseURL: lastBaseURL,
+            lastAPIKeyEnvName: lastAPIKeyEnvName,
+            lastAPIKey: lastAPIKey,
+            lastModel: lastModel,
+            lastAvailableModels: lastAvailableModels,
+            lastModelSettings: lastModelSettings
         )
     }
 }

@@ -65,6 +65,90 @@ struct ProviderPreset: Identifiable, Equatable, Sendable {
     }
 }
 
+struct ProviderModelSettings: Codable, Hashable, Sendable {
+    static let defaultTemperature = 0.3
+    static let defaultTopP = 0.95
+
+    // 用户在 Provider 接入边界配置的模型与采样参数。
+    var model: String
+    var temperature: Double
+    var topP: Double
+
+    init(
+        model: String,
+        temperature: Double = Self.defaultTemperature,
+        topP: Double = Self.defaultTopP
+    ) {
+        self.model = model
+        self.temperature = temperature
+        self.topP = topP
+    }
+}
+
+extension ProviderModelSettings {
+    static func normalized(_ settings: [ProviderModelSettings], fallbackModel: String?) -> [ProviderModelSettings] {
+        var normalized = [ProviderModelSettings]()
+        var seen = Set<String>()
+
+        for setting in settings {
+            let trimmedModel = setting.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedModel.isEmpty, seen.insert(trimmedModel).inserted else { continue }
+            normalized.append(
+                ProviderModelSettings(
+                    model: trimmedModel,
+                    temperature: setting.temperature,
+                    topP: setting.topP
+                )
+            )
+        }
+
+        let trimmedFallback = fallbackModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedFallback.isEmpty, seen.insert(trimmedFallback).inserted {
+            normalized.append(ProviderModelSettings(model: trimmedFallback))
+        }
+
+        return normalized
+    }
+
+    static func modelNames(from settings: [ProviderModelSettings], fallbackModel: String?) -> [String] {
+        normalized(settings, fallbackModel: fallbackModel).map(\.model)
+    }
+
+    static func parameters(
+        for requestedModel: String?,
+        in settings: [ProviderModelSettings],
+        fallbackModel: String?
+    ) -> ProviderModelSettings? {
+        let normalizedSettings = normalized(settings, fallbackModel: fallbackModel)
+        guard !normalizedSettings.isEmpty else { return nil }
+
+        let trimmedModel = requestedModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let matched = normalizedSettings.first(where: { $0.model == trimmedModel }) {
+            return matched
+        }
+
+        return ProviderModelSettings(model: trimmedModel.isEmpty ? normalizedSettings[0].model : trimmedModel)
+    }
+
+    static func applyParameters(
+        toJSONData data: Data,
+        requestedModel: String?,
+        settings: [ProviderModelSettings],
+        fallbackModel: String?
+    ) throws -> Data {
+        guard let parameters = parameters(for: requestedModel, in: settings, fallbackModel: fallbackModel) else {
+            return data
+        }
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return data
+        }
+
+        object["temperature"] = parameters.temperature
+        object["top_p"] = parameters.topP
+        return try JSONSerialization.data(withJSONObject: object, options: [])
+    }
+}
+
 enum ProviderCatalog {
     static let customPresetID = "custom"
 

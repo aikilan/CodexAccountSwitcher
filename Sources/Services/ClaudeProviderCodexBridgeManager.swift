@@ -63,7 +63,8 @@ actor ClaudeProviderCodexBridgeManager {
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings] = []
     ) async throws -> PreparedClaudeProviderCodexBridge {
         let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,7 +81,8 @@ actor ClaudeProviderCodexBridgeManager {
             apiKeyEnvName: apiKeyEnvName.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: trimmedAPIKey,
             model: trimmedModel,
-            availableModels: availableModels
+            availableModels: availableModels,
+            modelSettings: modelSettings
         )
         let localBaseURL = try await server.startIfNeeded()
         servers[accountID.uuidString] = server
@@ -131,6 +133,7 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
     private var apiKey = ""
     private var defaultModel = "claude-sonnet-4.5"
     private var availableModels = ["claude-sonnet-4.5"]
+    private var modelSettings = [ProviderModelSettings(model: "claude-sonnet-4.5")]
 
     init(
         sendUpstreamRequest: @escaping @Sendable (String, String, Data) async throws -> (Int, Data)
@@ -138,13 +141,21 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
         self.sendUpstreamRequest = sendUpstreamRequest
     }
 
-    func update(baseURL: String, apiKeyEnvName: String, apiKey: String, model: String, availableModels: [String]) {
+    func update(
+        baseURL: String,
+        apiKeyEnvName: String,
+        apiKey: String,
+        model: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) {
         stateQueue.sync {
             self.upstreamBaseURL = baseURL
             self.apiKeyEnvName = apiKeyEnvName.isEmpty ? "ANTHROPIC_API_KEY" : apiKeyEnvName
             self.apiKey = apiKey
             self.defaultModel = model
             self.availableModels = normalizedAvailableModels(availableModels, fallbackModel: model)
+            self.modelSettings = ProviderModelSettings.normalized(modelSettings, fallbackModel: model)
         }
     }
 
@@ -301,7 +312,11 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
             let state = currentState()
             let requestObject = try requestJSONObject(from: request.body)
             let wantsStream = (requestObject["stream"] as? Bool) ?? false
-            let upstreamRequest = try Self.makeClaudeRequest(from: requestObject, fallbackModel: state.defaultModel)
+            let upstreamRequest = try Self.makeClaudeRequest(
+                from: requestObject,
+                fallbackModel: state.defaultModel,
+                modelSettings: state.modelSettings
+            )
             let (statusCode, data) = try await sendUpstreamRequestHandlingOverload(
                 baseURL: state.baseURL,
                 apiKey: state.apiKey,
@@ -330,9 +345,16 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
         return object
     }
 
-    private func currentState() -> (baseURL: String, apiKeyEnvName: String, apiKey: String, defaultModel: String, availableModels: [String]) {
+    private func currentState() -> (
+        baseURL: String,
+        apiKeyEnvName: String,
+        apiKey: String,
+        defaultModel: String,
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
+    ) {
         stateQueue.sync {
-            (upstreamBaseURL, apiKeyEnvName, apiKey, defaultModel, availableModels)
+            (upstreamBaseURL, apiKeyEnvName, apiKey, defaultModel, availableModels, modelSettings)
         }
     }
 
@@ -443,7 +465,11 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
         }
     }
 
-    private static func makeClaudeRequest(from request: [String: Any], fallbackModel: String) throws -> Data {
+    private static func makeClaudeRequest(
+        from request: [String: Any],
+        fallbackModel: String,
+        modelSettings: [ProviderModelSettings]
+    ) throws -> Data {
         let model = (request["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? (request["model"] as? String ?? fallbackModel)
             : fallbackModel
@@ -457,6 +483,14 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
             "messages": messages,
             "max_tokens": 8192,
         ]
+        if let parameters = ProviderModelSettings.parameters(
+            for: model,
+            in: modelSettings,
+            fallbackModel: fallbackModel
+        ) {
+            body["temperature"] = parameters.temperature
+            body["top_p"] = parameters.topP
+        }
         if let instructions, !instructions.isEmpty {
             body["system"] = instructions
         }

@@ -1044,7 +1044,8 @@ private struct ResolverOpenAICompatibleProviderBridgeManager: OpenAICompatiblePr
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedOpenAICompatibleProviderCodexBridge {
         PreparedOpenAICompatibleProviderCodexBridge(
             baseURL: "http://127.0.0.1:18082",
@@ -1081,7 +1082,8 @@ private actor RecordingResolverOpenAICompatibleProviderBridgeManager: OpenAIComp
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedOpenAICompatibleProviderCodexBridge {
         lastAvailableModels = availableModels
         return PreparedOpenAICompatibleProviderCodexBridge(
@@ -1105,7 +1107,8 @@ private actor RecordingResolverClaudeProviderBridgeManager: ClaudeProviderCodexB
         apiKeyEnvName: String,
         apiKey: String,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedClaudeProviderCodexBridge {
         lastAvailableModels = availableModels
         return PreparedClaudeProviderCodexBridge(
@@ -1127,7 +1130,8 @@ private actor RecordingResolverCodexOAuthClaudeBridgeManager: CodexOAuthClaudeBr
         accountID: UUID,
         source: OpenAICompatibleClaudeBridgeSource,
         model: String,
-        availableModels: [String]
+        availableModels: [String],
+        modelSettings: [ProviderModelSettings]
     ) async throws -> PreparedCodexOAuthClaudeBridge {
         lastAvailableModels = availableModels
         return PreparedCodexOAuthClaudeBridge(
