@@ -337,6 +337,68 @@ enum ProviderCatalog {
     }
 }
 
+private func providerHost(from baseURL: String) -> String? {
+    let trimmedBaseURL = baseURL
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    guard !trimmedBaseURL.isEmpty else {
+        return nil
+    }
+
+    let rawURL = URL(string: trimmedBaseURL)
+        ?? URL(string: "https://\(trimmedBaseURL)")
+    return rawURL?.host?.lowercased()
+}
+
+func isDeepSeekAPIHost(_ baseURL: String) -> Bool {
+    providerHost(from: baseURL) == "api.deepseek.com"
+}
+
+func isMoonshotAPIHost(_ baseURL: String) -> Bool {
+    let host = providerHost(from: baseURL)
+    return host == "api.moonshot.ai" || host == "api.moonshot.cn"
+}
+
+func isGLMCompatibleAPIHost(_ baseURL: String) -> Bool {
+    let host = providerHost(from: baseURL)
+    return host == "api.z.ai" || host == "open.bigmodel.cn"
+}
+
+func openAICompatibleProviderSupportsMediaParts(baseURL: String, model: String) -> Bool {
+    let normalizedModel = model
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+
+    if isDeepSeekAPIHost(baseURL) || isMiniMaxAPIHost(baseURL) {
+        return false
+    }
+
+    if isMoonshotAPIHost(baseURL) {
+        return normalizedModel == "kimi-k2.5"
+            || normalizedModel == "kimi-k2.6"
+            || normalizedModel.hasSuffix("-vision-preview")
+    }
+
+    if isGLMCompatibleAPIHost(baseURL) {
+        return glmModelSupportsMediaParts(normalizedModel)
+    }
+
+    return true
+}
+
+private func glmModelSupportsMediaParts(_ normalizedModel: String) -> Bool {
+    normalizedModel.contains("vision")
+        || normalizedModel.contains("vlm")
+        || normalizedModel.range(
+            of: #"glm[-_.]?\d(?:[\d.]*v|v)"#,
+            options: .regularExpression
+        ) != nil
+}
+
+func claudeCompatibleProviderSupportsMediaBlocks(baseURL: String) -> Bool {
+    !isMiniMaxAPIHost(baseURL)
+}
+
 func isMiniMaxAPIHost(_ baseURL: String) -> Bool {
     let trimmedBaseURL = baseURL
         .trimmingCharacters(in: .whitespacesAndNewlines)

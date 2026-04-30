@@ -33,7 +33,8 @@ enum ResponsesChatCompletionsBridge {
         usesMaxCompletionTokens: Bool = false,
         supportsParallelToolCalls: Bool = true,
         usesMiniMaxReasoning: Bool = false,
-        usesDeepSeekReasoning: Bool = false
+        usesDeepSeekReasoning: Bool = false,
+        supportsMediaParts: Bool = true
     ) throws -> Data {
         guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TranslationError.invalidRequest(L10n.tr("Responses 请求不是有效的 JSON。"))
@@ -46,7 +47,8 @@ enum ResponsesChatCompletionsBridge {
             usesMaxCompletionTokens: usesMaxCompletionTokens,
             supportsParallelToolCalls: supportsParallelToolCalls,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
-            usesDeepSeekReasoning: usesDeepSeekReasoning
+            usesDeepSeekReasoning: usesDeepSeekReasoning,
+            supportsMediaParts: supportsMediaParts
         )
     }
 
@@ -57,7 +59,8 @@ enum ResponsesChatCompletionsBridge {
         usesMaxCompletionTokens: Bool = false,
         supportsParallelToolCalls: Bool = true,
         usesMiniMaxReasoning: Bool = false,
-        usesDeepSeekReasoning: Bool = false
+        usesDeepSeekReasoning: Bool = false,
+        supportsMediaParts: Bool = true
     ) throws -> Data {
         let object = try makeChatCompletionsRequestObject(
             from: request,
@@ -66,7 +69,8 @@ enum ResponsesChatCompletionsBridge {
             usesMaxCompletionTokens: usesMaxCompletionTokens,
             supportsParallelToolCalls: supportsParallelToolCalls,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
-            usesDeepSeekReasoning: usesDeepSeekReasoning
+            usesDeepSeekReasoning: usesDeepSeekReasoning,
+            supportsMediaParts: supportsMediaParts
         )
         return try JSONSerialization.data(withJSONObject: object, options: [])
     }
@@ -485,7 +489,8 @@ enum ResponsesChatCompletionsBridge {
         usesMaxCompletionTokens: Bool = false,
         supportsParallelToolCalls: Bool = true,
         usesMiniMaxReasoning: Bool = false,
-        usesDeepSeekReasoning: Bool = false
+        usesDeepSeekReasoning: Bool = false,
+        supportsMediaParts: Bool = true
     ) throws -> Data {
         var prepassRequest = request
         prepassRequest["model"] = multimodalModel
@@ -502,7 +507,8 @@ enum ResponsesChatCompletionsBridge {
             usesMaxCompletionTokens: usesMaxCompletionTokens,
             supportsParallelToolCalls: supportsParallelToolCalls,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
-            usesDeepSeekReasoning: usesDeepSeekReasoning
+            usesDeepSeekReasoning: usesDeepSeekReasoning,
+            supportsMediaParts: supportsMediaParts
         )
     }
 
@@ -514,7 +520,8 @@ enum ResponsesChatCompletionsBridge {
         usesMaxCompletionTokens: Bool = false,
         supportsParallelToolCalls: Bool = true,
         usesMiniMaxReasoning: Bool = false,
-        usesDeepSeekReasoning: Bool = false
+        usesDeepSeekReasoning: Bool = false,
+        supportsMediaParts: Bool = true
     ) throws -> Data {
         var textOnlyRequest = request
         textOnlyRequest["input"] = textOnlyInput(from: request["input"], attachmentSummary: attachmentSummary)
@@ -525,7 +532,8 @@ enum ResponsesChatCompletionsBridge {
             usesMaxCompletionTokens: usesMaxCompletionTokens,
             supportsParallelToolCalls: supportsParallelToolCalls,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
-            usesDeepSeekReasoning: usesDeepSeekReasoning
+            usesDeepSeekReasoning: usesDeepSeekReasoning,
+            supportsMediaParts: supportsMediaParts
         )
     }
 
@@ -680,7 +688,8 @@ enum ResponsesChatCompletionsBridge {
         usesMaxCompletionTokens: Bool,
         supportsParallelToolCalls: Bool,
         usesMiniMaxReasoning: Bool,
-        usesDeepSeekReasoning: Bool
+        usesDeepSeekReasoning: Bool,
+        supportsMediaParts: Bool
     ) throws -> [String: Any] {
         let model = trimmedString(request["model"]) ?? fallbackModel
         let instructions = trimmedString(request["instructions"])
@@ -688,7 +697,8 @@ enum ResponsesChatCompletionsBridge {
             from: request["input"],
             instructions: instructions,
             usesMiniMaxReasoning: usesMiniMaxReasoning,
-            usesDeepSeekReasoning: usesDeepSeekReasoning
+            usesDeepSeekReasoning: usesDeepSeekReasoning,
+            supportsMediaParts: supportsMediaParts
         )
         let tools = translateTools(
             from: request["tools"],
@@ -728,7 +738,8 @@ enum ResponsesChatCompletionsBridge {
         from input: Any?,
         instructions: String?,
         usesMiniMaxReasoning: Bool,
-        usesDeepSeekReasoning: Bool
+        usesDeepSeekReasoning: Bool,
+        supportsMediaParts: Bool
     ) throws -> [[String: Any]] {
         var messages = [[String: Any]]()
         if let instructions, !instructions.isEmpty {
@@ -791,7 +802,11 @@ enum ResponsesChatCompletionsBridge {
             case "message":
                 let role = normalizedRole(from: item["role"])
                 var message: [String: Any] = ["role": role]
-                if let content = translateMessageContent(from: item["content"], role: role) {
+                if let content = translateMessageContent(
+                    from: item["content"],
+                    role: role,
+                    supportsMediaParts: supportsMediaParts
+                ) {
                     message["content"] = content
                 } else if role == "assistant" {
                     message["content"] = NSNull()
@@ -1001,7 +1016,8 @@ enum ResponsesChatCompletionsBridge {
         }
     }
 
-    private static func translateMessageContent(from value: Any?, role: String) -> Any? {
+    // supportsMediaParts 为 false 时只保留文本 part，适配只接受 text content 的上游。
+    private static func translateMessageContent(from value: Any?, role: String, supportsMediaParts: Bool) -> Any? {
         if let string = value as? String {
             return string
         }
@@ -1025,6 +1041,7 @@ enum ResponsesChatCompletionsBridge {
                     "text": text,
                 ])
             case "input_image":
+                guard supportsMediaParts else { continue }
                 guard let imageURL = mediaContentObject(from: item["image_url"], requiredKey: "url") else { continue }
                 hasRichMedia = true
                 richParts.append([
@@ -1032,6 +1049,7 @@ enum ResponsesChatCompletionsBridge {
                     "image_url": imageURL,
                 ])
             case "image_url":
+                guard supportsMediaParts else { continue }
                 guard let imageURL = mediaContentObject(from: item["image_url"], requiredKey: "url") else { continue }
                 hasRichMedia = true
                 richParts.append([
@@ -1039,6 +1057,7 @@ enum ResponsesChatCompletionsBridge {
                     "image_url": imageURL,
                 ])
             case "input_audio":
+                guard supportsMediaParts else { continue }
                 guard let inputAudio = mediaContentObject(from: item["input_audio"], requiredKey: "data") else { continue }
                 hasRichMedia = true
                 richParts.append([
@@ -1046,6 +1065,7 @@ enum ResponsesChatCompletionsBridge {
                     "input_audio": inputAudio,
                 ])
             case "video_url":
+                guard supportsMediaParts else { continue }
                 guard let videoURL = mediaContentObject(from: item["video_url"], requiredKey: "url") else { continue }
                 hasRichMedia = true
                 richParts.append([
@@ -1053,6 +1073,7 @@ enum ResponsesChatCompletionsBridge {
                     "video_url": videoURL,
                 ])
             case "input_file":
+                guard supportsMediaParts else { continue }
                 guard let mediaPart = fileDataMediaPart(from: item) else { continue }
                 hasRichMedia = true
                 richParts.append(mediaPart)

@@ -120,6 +120,174 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertEqual(output.last?["type"] as? String, "function_call")
     }
 
+    func testDeepSeekBridgeStripsMediaPartsBeforeCallingUpstream() async throws {
+        actor Recorder {
+            var lastRequestBody: Data?
+
+            func store(_ data: Data) {
+                lastRequestBody = data
+            }
+
+            func body() -> Data? {
+                lastRequestBody
+            }
+        }
+
+        let recorder = Recorder()
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_deepseek_media",
+            "model": "deepseek-chat",
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "content": "我无法直接读取图片，但可以继续处理文本说明。",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+        ])
+
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, body in
+                await recorder.store(body)
+                return (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.deepseek.com/v1",
+            apiKeyEnvName: "DEEPSEEK_API_KEY",
+            apiKey: "sk-deepseek-test",
+            model: "deepseek-chat",
+            availableModels: ["deepseek-chat"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "deepseek-chat",
+            "stream": false,
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "input_text",
+                            "text": "根据截图描述问题",
+                        ],
+                        [
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,aaa",
+                        ],
+                    ],
+                ],
+            ],
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (_, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let lastRequestBody = await recorder.body()
+        let recordedBody = try XCTUnwrap(lastRequestBody)
+        let bodyText = try XCTUnwrap(String(data: recordedBody, encoding: .utf8))
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: recordedBody) as? [String: Any])
+        let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(upstreamMessages.first?["content"] as? String, "根据截图描述问题")
+        XCTAssertFalse(bodyText.contains("image_url"))
+        XCTAssertFalse(bodyText.contains("data:image/png;base64,aaa"))
+    }
+
+    func testMiniMaxBridgeStripsMediaPartsBeforeCallingUpstream() async throws {
+        let recordedBody = try await capturedOpenAICompatibleUpstreamBody(
+            baseURL: "https://api.minimax.io/v1",
+            model: "MiniMax-M2.7",
+            content: mediaContentParts()
+        )
+        let bodyText = try XCTUnwrap(String(data: recordedBody, encoding: .utf8))
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: recordedBody) as? [String: Any])
+        let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+
+        XCTAssertEqual(upstreamMessages.first?["content"] as? String, "根据截图描述问题")
+        XCTAssertFalse(bodyText.contains("image_url"))
+        XCTAssertFalse(bodyText.contains("data:image/png;base64,aaa"))
+    }
+
+    func testMoonshotTextModelStripsMediaPartsBeforeCallingUpstream() async throws {
+        let recordedBody = try await capturedOpenAICompatibleUpstreamBody(
+            baseURL: "https://api.moonshot.cn/v1",
+            model: "kimi-k2-0711-preview",
+            content: mediaContentParts()
+        )
+        let bodyText = try XCTUnwrap(String(data: recordedBody, encoding: .utf8))
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: recordedBody) as? [String: Any])
+        let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+
+        XCTAssertEqual(upstreamMessages.first?["content"] as? String, "根据截图描述问题")
+        XCTAssertFalse(bodyText.contains("image_url"))
+        XCTAssertFalse(bodyText.contains("data:image/png;base64,aaa"))
+    }
+
+    func testMoonshotVisionModelForwardsMediaPartsBeforeCallingUpstream() async throws {
+        let recordedBody = try await capturedOpenAICompatibleUpstreamBody(
+            baseURL: "https://api.moonshot.cn/v1",
+            model: "kimi-k2.6",
+            content: mediaContentParts()
+        )
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: recordedBody) as? [String: Any])
+        let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(upstreamMessages.first?["content"] as? [[String: Any]])
+        let imageURL = try XCTUnwrap(content[1]["image_url"] as? [String: Any])
+
+        XCTAssertEqual(content[1]["type"] as? String, "image_url")
+        XCTAssertEqual(imageURL["url"] as? String, "data:image/png;base64,aaa")
+    }
+
+    func testGLMTextModelStripsMediaPartsBeforeCallingUpstream() async throws {
+        for baseURL in [
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+        ] {
+            for model in ["glm-5", "glm-5-preview"] {
+                let recordedBody = try await capturedOpenAICompatibleUpstreamBody(
+                    baseURL: baseURL,
+                    model: model,
+                    content: mediaContentParts()
+                )
+                let bodyText = try XCTUnwrap(String(data: recordedBody, encoding: .utf8))
+                let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: recordedBody) as? [String: Any])
+                let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+
+                XCTAssertEqual(upstreamMessages.first?["content"] as? String, "根据截图描述问题")
+                XCTAssertFalse(bodyText.contains("image_url"))
+                XCTAssertFalse(bodyText.contains("data:image/png;base64,aaa"))
+            }
+        }
+    }
+
+    func testGLMVisionModelForwardsMediaPartsBeforeCallingUpstream() async throws {
+        let recordedBody = try await capturedOpenAICompatibleUpstreamBody(
+            baseURL: "https://api.z.ai/api/coding/paas/v4",
+            model: "glm-5v-turbo",
+            content: mediaContentParts()
+        )
+        let upstreamRequestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: recordedBody) as? [String: Any])
+        let upstreamMessages = try XCTUnwrap(upstreamRequestObject["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(upstreamMessages.first?["content"] as? [[String: Any]])
+        let imageURL = try XCTUnwrap(content[1]["image_url"] as? [String: Any])
+
+        XCTAssertEqual(content[1]["type"] as? String, "image_url")
+        XCTAssertEqual(imageURL["url"] as? String, "data:image/png;base64,aaa")
+    }
+
     func testDeepSeekBridgePreservesReasoningContentAcrossTurns() async throws {
         actor Recorder {
             var lastRequestBody: Data?
@@ -1220,5 +1388,92 @@ final class OpenAICompatibleProviderCodexBridgeManagerTests: XCTestCase {
         let models = try XCTUnwrap(object["data"] as? [[String: Any]])
 
         XCTAssertEqual(models.compactMap { $0["id"] as? String }, ["deepseek-chat"])
+    }
+
+    private func capturedOpenAICompatibleUpstreamBody(
+        baseURL: String,
+        model: String,
+        content: [[String: Any]]
+    ) async throws -> Data {
+        actor Recorder {
+            var lastRequestBody: Data?
+
+            func store(_ data: Data) {
+                lastRequestBody = data
+            }
+
+            func body() -> Data? {
+                lastRequestBody
+            }
+        }
+
+        let recorder = Recorder()
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "chatcmpl_media_support",
+            "model": model,
+            "choices": [
+                [
+                    "index": 0,
+                    "message": [
+                        "role": "assistant",
+                        "content": "ok",
+                    ],
+                    "finish_reason": "stop",
+                ],
+            ],
+        ])
+        let manager = OpenAICompatibleProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, body in
+                await recorder.store(body)
+                return (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: baseURL,
+            apiKeyEnvName: "PROVIDER_API_KEY",
+            apiKey: "sk-provider-test",
+            model: model,
+            availableModels: [model]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "stream": false,
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": content,
+                ],
+            ],
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (_, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let lastRequestBody = await recorder.body()
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        return try XCTUnwrap(lastRequestBody)
+    }
+
+    private func mediaContentParts() -> [[String: Any]] {
+        [
+            [
+                "type": "input_text",
+                "text": "根据截图描述问题",
+            ],
+            [
+                "type": "input_image",
+                "image_url": "data:image/png;base64,aaa",
+            ],
+        ]
     }
 }

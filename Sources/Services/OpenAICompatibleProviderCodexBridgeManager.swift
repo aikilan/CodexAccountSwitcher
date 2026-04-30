@@ -315,15 +315,24 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
             let requestedModel = trimmedString(requestObject["model"])
             let effectiveModel = resolvedProviderModel(requestedModel, state: state)
             requestObject["model"] = effectiveModel
+            let usesDeepSeekCompatibility = isDeepSeekAPIHost(state.baseURL)
             let usesMiniMaxReasoning = isMiniMaxAPIHost(state.baseURL)
             let usesMiMoCompatibility = isMiMoAPIHost(state.baseURL)
-            let usesReasoningContent = isDeepSeekAPIHost(state.baseURL) || usesMiMoCompatibility
+            let usesReasoningContent = usesDeepSeekCompatibility || usesMiMoCompatibility
             let hasMedia = ResponsesChatCompletionsBridge.containsSupportedMedia(in: requestObject)
             let multimodalModel = ProviderModelSettings.parameters(
                 for: effectiveModel,
                 in: state.modelSettings,
                 fallbackModel: state.defaultModel
             )?.normalizedMultimodalModel
+            // Provider 边界必须按当前上游模型能力决定是否透传媒体块，避免文本模型拒绝整个请求。
+            let mainModelSupportsMediaParts = openAICompatibleProviderSupportsMediaParts(
+                baseURL: state.baseURL,
+                model: effectiveModel
+            )
+            let prepassModelSupportsMediaParts = multimodalModel.map {
+                openAICompatibleProviderSupportsMediaParts(baseURL: state.baseURL, model: $0)
+            } ?? false
             let upstreamRequest: Data
 
             await recordDebugRequestStarted(
@@ -353,7 +362,7 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
             }
 
             // 有附件且配置了关联模型时，先把附件解析成文本，再交给主模型执行工具调用。
-            if let multimodalModel, hasMedia {
+            if let multimodalModel, hasMedia, prepassModelSupportsMediaParts {
                 let prepassRequest = try ResponsesChatCompletionsBridge.makeMultimodalPrepassRequestData(
                     from: requestObject,
                     multimodalModel: multimodalModel,
@@ -362,7 +371,8 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                     usesMaxCompletionTokens: usesMiMoCompatibility,
                     supportsParallelToolCalls: !usesMiMoCompatibility,
                     usesMiniMaxReasoning: usesMiniMaxReasoning,
-                    usesDeepSeekReasoning: usesReasoningContent
+                    usesDeepSeekReasoning: usesReasoningContent,
+                    supportsMediaParts: prepassModelSupportsMediaParts
                 )
                 let parameterizedPrepassRequest = try ProviderModelSettings.applyParameters(
                     toJSONData: prepassRequest,
@@ -416,9 +426,11 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                     usesMaxCompletionTokens: usesMiMoCompatibility,
                     supportsParallelToolCalls: !usesMiMoCompatibility,
                     usesMiniMaxReasoning: usesMiniMaxReasoning,
-                    usesDeepSeekReasoning: usesReasoningContent
+                    usesDeepSeekReasoning: usesReasoningContent,
+                    supportsMediaParts: mainModelSupportsMediaParts
                 )
             } else {
+                // 文本-only 模型的 Chat Completions content part 只保留文本，不能透传 image_url 等媒体变体。
                 upstreamRequest = try ResponsesChatCompletionsBridge.makeChatCompletionsRequestData(
                     from: requestObject,
                     fallbackModel: state.defaultModel,
@@ -426,7 +438,8 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
                     usesMaxCompletionTokens: usesMiMoCompatibility,
                     supportsParallelToolCalls: !usesMiMoCompatibility,
                     usesMiniMaxReasoning: usesMiniMaxReasoning,
-                    usesDeepSeekReasoning: usesReasoningContent
+                    usesDeepSeekReasoning: usesReasoningContent,
+                    supportsMediaParts: mainModelSupportsMediaParts
                 )
             }
             let parameterizedUpstreamRequest = try ProviderModelSettings.applyParameters(
@@ -738,19 +751,6 @@ private final class OpenAICompatibleProviderCodexBridgeServer: @unchecked Sendab
         }
 
         return normalized
-    }
-
-    private func isDeepSeekAPIHost(_ baseURL: String) -> Bool {
-        let trimmedBaseURL = baseURL
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmedBaseURL.isEmpty else {
-            return false
-        }
-
-        let rawURL = URL(string: trimmedBaseURL)
-            ?? URL(string: "https://\(trimmedBaseURL)")
-        return rawURL?.host?.lowercased() == "api.deepseek.com"
     }
 
     private func trimmedString(_ value: Any?) -> String? {

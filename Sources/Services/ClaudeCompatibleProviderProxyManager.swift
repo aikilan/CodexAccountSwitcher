@@ -323,17 +323,20 @@ private final class ClaudeCompatibleProviderProxyServer: @unchecked Sendable {
     ) async -> HTTPResponse {
         do {
             let state = currentState()
+            let mediaAdjustedBody = claudeCompatibleProviderSupportsMediaBlocks(baseURL: state.baseURL)
+                ? request.body
+                : try Self.bodyByStrippingUnsupportedMediaBlocks(from: request.body)
             let body: Data
             if injectModelParameters {
                 // Claude Code 直连 provider 时，请求体在代理边界统一补齐当前模型采样参数。
                 body = try ProviderModelSettings.applyParameters(
-                    toJSONData: request.body,
-                    requestedModel: requestModel(from: request.body),
+                    toJSONData: mediaAdjustedBody,
+                    requestedModel: requestModel(from: mediaAdjustedBody),
                     settings: state.modelSettings,
                     fallbackModel: state.defaultModel
                 )
             } else {
-                body = request.body
+                body = mediaAdjustedBody
             }
             let (statusCode, data) = try await sendUpstreamRequest(
                 state.baseURL,
@@ -349,6 +352,41 @@ private final class ClaudeCompatibleProviderProxyServer: @unchecked Sendable {
         } catch {
             return jsonResponse(statusCode: 502, body: errorPayload(message: error.localizedDescription))
         }
+    }
+
+    private static func bodyByStrippingUnsupportedMediaBlocks(from data: Data) throws -> Data {
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return data
+        }
+        guard let messages = object["messages"] as? [Any] else {
+            return data
+        }
+
+        // MiniMax 的 Anthropic 兼容接口只接受文本、工具与 thinking 块，图片和文档必须在代理边界剥离。
+        object["messages"] = messages.map { messageValue -> Any in
+            guard var message = messageValue as? [String: Any] else {
+                return messageValue
+            }
+            message["content"] = strippedUnsupportedMediaBlocks(from: message["content"])
+            return message
+        }
+        return try JSONSerialization.data(withJSONObject: object, options: [])
+    }
+
+    private static func strippedUnsupportedMediaBlocks(from content: Any?) -> Any {
+        guard let blocks = content as? [Any] else {
+            return content ?? ""
+        }
+
+        let stripped = blocks.filter { blockValue in
+            guard let block = blockValue as? [String: Any] else {
+                return true
+            }
+            let type = block["type"] as? String
+            return type != "image" && type != "document"
+        }
+        let fallback: [[String: Any]] = [["type": "text", "text": ""]]
+        return stripped.isEmpty ? fallback : stripped
     }
 
     private func requestModel(from data: Data) -> String? {

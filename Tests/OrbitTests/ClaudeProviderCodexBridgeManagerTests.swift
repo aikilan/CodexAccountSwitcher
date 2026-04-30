@@ -222,6 +222,99 @@ final class ClaudeProviderCodexBridgeManagerTests: XCTestCase {
         XCTAssertFalse(upstreamText.contains("file_openai_only"))
     }
 
+    func testMiniMaxBridgeStripsUnsupportedCodexAttachmentsBeforeCallingUpstream() async throws {
+        actor Recorder {
+            var lastRequestBody: Data?
+
+            func store(_ data: Data) {
+                lastRequestBody = data
+            }
+
+            func body() -> Data? {
+                lastRequestBody
+            }
+        }
+
+        let recorder = Recorder()
+        let upstreamResponse = try JSONSerialization.data(withJSONObject: [
+            "id": "msg_minimax_media",
+            "type": "message",
+            "role": "assistant",
+            "model": "MiniMax-M2.7",
+            "content": [
+                ["type": "text", "text": "ok"],
+            ],
+            "stop_reason": "end_turn",
+            "usage": [
+                "input_tokens": 1,
+                "output_tokens": 1,
+            ],
+        ])
+        let manager = ClaudeProviderCodexBridgeManager(
+            sendUpstreamRequest: { _, _, body in
+                await recorder.store(body)
+                return (200, upstreamResponse)
+            }
+        )
+
+        let bridge = try await manager.prepareBridge(
+            accountID: UUID(),
+            baseURL: "https://api.minimax.io/anthropic",
+            apiKeyEnvName: "ANTHROPIC_AUTH_TOKEN",
+            apiKey: "sk-minimax-test",
+            model: "MiniMax-M2.7",
+            availableModels: ["MiniMax-M2.7"]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(bridge.baseURL)/v1/responses")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "stream": false,
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "input_text",
+                            "text": "看附件",
+                        ],
+                        [
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,aaa",
+                        ],
+                        [
+                            "type": "input_file",
+                            "filename": "report.pdf",
+                            "file_data": "data:application/pdf;base64,bbb",
+                        ],
+                    ],
+                ],
+            ],
+        ])
+
+        let session = URLSession(configuration: .ephemeral)
+        let (_, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let recordedBody = await recorder.body()
+        let upstreamBody = try XCTUnwrap(recordedBody)
+        let upstreamObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamBody) as? [String: Any])
+        let messages = try XCTUnwrap(upstreamObject["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(messages.first?["content"] as? [[String: Any]])
+        let upstreamText = try XCTUnwrap(String(data: upstreamBody, encoding: .utf8))
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(content.count, 1)
+        XCTAssertEqual(content[0]["type"] as? String, "text")
+        XCTAssertEqual(content[0]["text"] as? String, "看附件")
+        XCTAssertFalse(upstreamText.contains("image"))
+        XCTAssertFalse(upstreamText.contains("document"))
+        XCTAssertFalse(upstreamText.contains("data:image/png;base64,aaa"))
+        XCTAssertFalse(upstreamText.contains("data:application/pdf;base64,bbb"))
+    }
+
     func testBridgeNormalizesPersistent529To429AfterRetrying() async throws {
         actor AttemptCounter {
             private var count = 0

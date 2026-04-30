@@ -89,6 +89,106 @@ final class ClaudeCompatibleProviderProxyManagerTests: XCTestCase {
         XCTAssertEqual(upstreamObject["top_p"] as? Double, 0.86)
     }
 
+    func testMiniMaxMessagesEndpointStripsUnsupportedMediaBlocks() async throws {
+        actor Recorder {
+            var lastBody: Data?
+
+            func store(_ body: Data) {
+                lastBody = body
+            }
+
+            func body() -> Data? {
+                lastBody
+            }
+        }
+
+        let recorder = Recorder()
+        let manager = ClaudeCompatibleProviderProxyManager(
+            sendUpstreamRequest: { _, _, _, _, body in
+                await recorder.store(body)
+                let response = try JSONSerialization.data(withJSONObject: [
+                    "id": "msg_minimax",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "MiniMax-M2.7",
+                    "content": [
+                        ["type": "text", "text": "ok"],
+                    ],
+                    "stop_reason": "end_turn",
+                    "usage": [
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                    ],
+                ])
+                return (200, response)
+            }
+        )
+
+        let proxy = try await manager.prepareProxy(
+            accountID: UUID(),
+            baseURL: "https://api.minimax.io/anthropic",
+            apiKeyEnvName: "ANTHROPIC_AUTH_TOKEN",
+            apiKey: "sk-minimax-test",
+            model: "MiniMax-M2.7",
+            availableModels: ["MiniMax-M2.7"],
+            modelSettings: [ProviderModelSettings(model: "MiniMax-M2.7")]
+        )
+
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "\(proxy.baseURL)/v1/messages")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "MiniMax-M2.7",
+            "max_tokens": 1024,
+            "messages": [
+                [
+                    "role": "user",
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "看附件",
+                        ],
+                        [
+                            "type": "image",
+                            "source": [
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aaa",
+                            ],
+                        ],
+                        [
+                            "type": "document",
+                            "source": [
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": "bbb",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ])
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let (_, response) = try await session.data(for: request)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+        let recordedBody = await recorder.body()
+        let upstreamBody = try XCTUnwrap(recordedBody)
+        let upstreamObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: upstreamBody) as? [String: Any])
+        let messages = try XCTUnwrap(upstreamObject["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(messages.first?["content"] as? [[String: Any]])
+        let bodyText = try XCTUnwrap(String(data: upstreamBody, encoding: .utf8))
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(content.count, 1)
+        XCTAssertEqual(content[0]["type"] as? String, "text")
+        XCTAssertEqual(content[0]["text"] as? String, "看附件")
+        XCTAssertFalse(bodyText.contains("image/png"))
+        XCTAssertFalse(bodyText.contains("application/pdf"))
+    }
+
     func testStreamingUpstreamErrorReturnsJSONContentType() async throws {
         let manager = ClaudeCompatibleProviderProxyManager(
             sendUpstreamRequest: { _, _, _, _, _ in

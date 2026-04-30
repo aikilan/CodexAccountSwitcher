@@ -320,7 +320,8 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
             let upstreamRequest = try Self.makeClaudeRequest(
                 from: requestObject,
                 fallbackModel: state.defaultModel,
-                modelSettings: state.modelSettings
+                modelSettings: state.modelSettings,
+                supportsMediaBlocks: claudeCompatibleProviderSupportsMediaBlocks(baseURL: state.baseURL)
             )
             let (statusCode, data) = try await sendUpstreamRequestHandlingOverload(
                 baseURL: state.baseURL,
@@ -473,13 +474,14 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
     private static func makeClaudeRequest(
         from request: [String: Any],
         fallbackModel: String,
-        modelSettings: [ProviderModelSettings]
+        modelSettings: [ProviderModelSettings],
+        supportsMediaBlocks: Bool = true
     ) throws -> Data {
         let model = (request["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? (request["model"] as? String ?? fallbackModel)
             : fallbackModel
         let instructions = (request["instructions"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let messages = translateMessages(from: request["input"])
+        let messages = translateMessages(from: request["input"], supportsMediaBlocks: supportsMediaBlocks)
         let tools = translateTools(from: request["tools"])
         let toolChoice = translateToolChoice(from: request["tool_choice"])
 
@@ -508,7 +510,7 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
         return try JSONSerialization.data(withJSONObject: body, options: [])
     }
 
-    private static func translateMessages(from input: Any?) -> [[String: Any]] {
+    private static func translateMessages(from input: Any?, supportsMediaBlocks: Bool) -> [[String: Any]] {
         if let text = input as? String, !text.isEmpty {
             return [[
                 "role": "user",
@@ -537,7 +539,7 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
                     pendingToolResults.removeAll()
                 }
                 let role = (item["role"] as? String) ?? "user"
-                let content = translateMessageContent(from: item["content"])
+                let content = translateMessageContent(from: item["content"], supportsMediaBlocks: supportsMediaBlocks)
                 messages.append([
                     "role": role == "assistant" ? "assistant" : "user",
                     "content": content.isEmpty ? [["type": "text", "text": ""]] : content,
@@ -564,7 +566,7 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
         return messages
     }
 
-    private static func translateMessageContent(from content: Any?) -> [[String: Any]] {
+    private static func translateMessageContent(from content: Any?, supportsMediaBlocks: Bool) -> [[String: Any]] {
         if let text = content as? String {
             return [["type": "text", "text": text]]
         }
@@ -582,10 +584,12 @@ private final class ClaudeProviderCodexBridgeServer: @unchecked Sendable {
                     "text": (contentItem["text"] as? String) ?? "",
                 ])
             case "input_image", "image_url":
+                guard supportsMediaBlocks else { continue }
                 if let image = imageContentBlock(from: contentItem) {
                     translated.append(image)
                 }
             case "input_file":
+                guard supportsMediaBlocks else { continue }
                 if let file = fileContentBlock(from: contentItem) {
                     translated.append(file)
                 }
